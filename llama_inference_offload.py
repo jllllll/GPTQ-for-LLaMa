@@ -11,13 +11,13 @@ from transformers import AutoTokenizer
 
 DEV = torch.device('cuda:0')
 import copy 
-from transformers.models.llama.modeling_llama import LLaMAModel,LLaMAConfig
+from transformers.models.llama.modeling_llama import LlamaModel,LlamaConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from typing import List, Optional, Tuple, Union
 import time
 
-class Offload_LLaMAModel(LLaMAModel):
-    def __init__(self, config: LLaMAConfig):
+class Offload_LlamaModel(LlamaModel):
+    def __init__(self, config: LlamaConfig):
         super().__init__(config)
 
     def forward(
@@ -53,8 +53,8 @@ class Offload_LLaMAModel(LLaMAModel):
                 that don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of
                 all `decoder_input_ids` of shape `(batch_size, sequence_length)`.
             use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
-                `past_key_values`).
+                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
+                (see `past_key_values`).
             inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
                 Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
                 This is useful if you want more control over how to convert `input_ids` indices into associated vectors
@@ -80,24 +80,26 @@ class Offload_LLaMAModel(LLaMAModel):
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
         elif input_ids is not None:
-            input_shape = input_ids.size()
-            input_ids = input_ids.view(-1, input_shape[-1])
+            batch_size, seq_length = input_ids.shape
         elif inputs_embeds is not None:
-            input_shape = inputs_embeds.size()[:-1]
+            batch_size, seq_length, _ = inputs_embeds.shape
         else:
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
-
-        past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
-
+        seq_length_with_past = seq_length
+        past_key_values_length = 0
+        if past_key_values is not None:
+            past_key_values_length = past_key_values[0][0].shape[2]
+            seq_length_with_past = seq_length_with_past + past_key_values_length
+            
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
         # embed positions
         if attention_mask is None:
-            attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.bool, device=inputs_embeds.device)
+            torch.ones((batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device	)
 
         attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask, input_shape, inputs_embeds, past_key_values_length
+            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
         )
 
         hidden_states = inputs_embeds
@@ -179,10 +181,10 @@ class Offload_LLaMAModel(LLaMAModel):
             attentions=all_self_attns,
         )
 
-def load_quant(model, checkpoint, wbits, pre_layer):
-    transformers.models.llama.modeling_llama.LLaMAModel = Offload_LLaMAModel
-    from transformers import LLaMAConfig, LLaMAForCausalLM 
-    config = LLaMAConfig.from_pretrained(model)
+def load_quant(model, checkpoint, wbits, groupsize, pre_layer):
+    transformers.models.llama.modeling_llama.LlamaModel = Offload_LlamaModel
+    from transformers import LlamaConfig, LlamaForCausalLM 
+    config = LlamaConfig.from_pretrained(model)
     def noop(*args, **kwargs):
         pass
     torch.nn.init.kaiming_uniform_ = noop 
@@ -192,14 +194,14 @@ def load_quant(model, checkpoint, wbits, pre_layer):
     torch.set_default_dtype(torch.half)
     transformers.modeling_utils._init_weights = False
     torch.set_default_dtype(torch.half)
-    model = LLaMAForCausalLM(config)
+    model = LlamaForCausalLM(config)
     torch.set_default_dtype(torch.float)
     model = model.eval()
     layers = find_layers(model)
     for name in ['lm_head']:
         if name in layers:
             del layers[name]
-    make_quant(model, layers, wbits)
+    make_quant(model, layers, wbits, groupsize)
 
     print('Loading model ...')
     if checkpoint.endswith('.safetensors'):
@@ -233,10 +235,13 @@ if __name__ == '__main__':
         help='#bits to use for quantization'
     )
     parser.add_argument(
+        '--groupsize', type=int, default=-1,
+        help='Groupsize to use for quantization; default uses full row.'
+    )
+    parser.add_argument(
         '--load', type=str, default='',
         help='Load quantized model.'
     )
-
     parser.add_argument(
         '--text', type=str,
         help='input text'
@@ -272,7 +277,7 @@ if __name__ == '__main__':
     if type(args.load) is not str:
         args.load = args.load.as_posix()
     
-    model = load_quant(args.model, args.load, args.wbits, args.pre_layer)
+    model = load_quant(args.model, args.load, args.wbits, args.groupsize, args.pre_layer)
         
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     input_ids = tokenizer.encode(args.text, return_tensors="pt").to(DEV)
