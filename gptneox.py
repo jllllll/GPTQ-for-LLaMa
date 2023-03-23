@@ -91,8 +91,8 @@ def gptneox_sequential(model, dataloader, dev):
         for name in subset:
             print(i, name)
             print('Quantizing ...')
-            gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize)
-            quantizers['gpt_neox.layers.%d.%s' % (i, name)] = gptq[name].quantizer
+            scale,zero = gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize)
+            quantizers['gpt_neox.layers.%d.%s' % (i, name)] = (gptq[name].quantizer,scale,zero)
             gptq[name].free()
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
@@ -202,20 +202,21 @@ def gptneox_eval(model, testenc, dev):
     model.config.use_cache = use_cache
 
 # TODO: perform packing on GPU
-def gptneox_pack(model, quantizers, wbits):
+def gptneox_pack(model, quantizers, wbits, groupsize):
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
-    make_quant(model, quantizers, wbits)
+    make_quant(model, quantizers, wbits, groupsize)
     qlayers = find_layers(model, [QuantLinear])
     print('Packing ...')
     for name in qlayers:
         print(name)
-        quantizers[name] = quantizers[name].cpu()
-        qlayers[name].pack(layers[name], quantizers[name].scale, quantizers[name].zero)
+        quantizers[name],scale,zero = quantizers[name]
+        quantizers[name],scale,zero = quantizers[name].cpu(),scale.cpu(),zero.cpu()
+        qlayers[name].pack(layers[name], scale, zero)
     print('Done.')
     return model
 
-def load_quant(model, checkpoint, wbits):
+def load_quant(model, checkpoint, wbits, groupsize):
     from transformers import GPTNeoXConfig, GPTNeoXForCausalLM 
     config = GPTNeoXConfig.from_pretrained(model)
     def noop(*args, **kwargs):
@@ -233,10 +234,14 @@ def load_quant(model, checkpoint, wbits):
     layers = find_layers(model)
     if 'embed_out' in layers:
         del layers['embed_out']
-    make_quant(model, layers, wbits)
+    make_quant(model, layers, wbits, groupsize)
 
     print('Loading model ...')
-    model.load_state_dict(torch.load(checkpoint))
+    if checkpoint.endswith('.safetensors'):
+        from safetensors.torch import load_file as safe_load
+        model.load_state_dict(safe_load(checkpoint))
+    else:
+        model.load_state_dict(torch.load(checkpoint))
     model.seqlen = model.config.max_position_embeddings
     print('Done.')
     return model
@@ -364,6 +369,10 @@ if __name__ == '__main__':
         help='Save quantized checkpoint under this name.'
     )
     parser.add_argument(
+        '--save_safetensors', type=str, default='',
+        help='Save quantized `.safetensors` checkpoint under this name.'
+    )
+    parser.add_argument(
         '--load', type=str, default='',
         help='Load quantized model.'
     )
@@ -378,8 +387,11 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    if type(args.load) is not str:
+        args.load = args.load.as_posix()
+
     if args.load:
-        model = load_quant(args.model, args.load, args.wbits)
+        model = load_quant(args.model, args.load, args.wbits, args.groupsize)
     else:
         model = get_gptneox(args.model)
         model.eval()
@@ -413,5 +425,10 @@ if __name__ == '__main__':
         gptneox_eval(model, testloader, DEV)
 
     if args.save:
-        gptneox_pack(model, quantizers, args.wbits)
+        gptneox_pack(model, quantizers, args.wbits, args.groupsize)
         torch.save(model.state_dict(), args.save) 
+
+    if args.save_safetensors:
+        opt_pack(model, quantizers, args.wbits, args.groupsize)
+        from safetensors.torch import save_file as safe_save
+        safe_save(model.state_dict(), args.save_safetensors)
