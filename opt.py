@@ -485,6 +485,15 @@ if __name__ == '__main__':
     if args.load:
         exit()
 
+    if args.save:
+        opt_pack(model, quantizers, args.wbits, args.groupsize)
+        torch.save(model.state_dict(), args.save) 
+
+    if args.save_safetensors:
+        opt_pack(model, quantizers, args.wbits, args.groupsize)
+        from safetensors.torch import save_file as safe_save
+        safe_save(model.state_dict(), args.save_safetensors)
+
     datasets = ['wikitext2', 'ptb', 'c4'] 
     if args.new_eval:
       datasets = ['wikitext2', 'ptb-new', 'c4-new']
@@ -494,12 +503,3 @@ if __name__ == '__main__':
         )
         print(dataset)
         opt_eval(model, testloader, DEV)
-
-    if args.save:
-        opt_pack(model, quantizers, args.wbits, args.groupsize)
-        torch.save(model.state_dict(), args.save) 
-
-    if args.save_safetensors:
-        opt_pack(model, quantizers, args.wbits, args.groupsize)
-        from safetensors.torch import save_file as safe_save
-        safe_save(model.state_dict(), args.save_safetensors)
