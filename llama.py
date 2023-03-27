@@ -68,33 +68,46 @@ def llama_sequential(model, dataloader, dev):
     quantizers = {}
     for i in range(len(layers)):
         layer = layers[i].to(dev)
-        subset = find_layers(layer)
-        gptq = {}
-        for name in subset:
-            gptq[name] = GPTQ(subset[name])
-            gptq[name].quantizer = Quantizer()
-            gptq[name].quantizer.configure(
-                args.wbits, perchannel=True, sym=False, mse=False
-            )
+        full = find_layers(layer)
+        if args.true_sequential:
+            sequential = [
+                ['self_attn.k_proj', 'self_attn.v_proj', 'self_attn.q_proj'],
+                ['self_attn.o_proj'],
+                ['mlp.up_proj', 'mlp.gate_proj'],
+                ['mlp.down_proj']
+            ]
+        else:
+            sequential = [list(full.keys())]
+       
+        for names in sequential:
+            subset = {n: full[n] for n in names}
+            gptq = {}
+            for name in subset:
+                gptq[name] = GPTQ(subset[name])
+                gptq[name].quantizer = Quantizer()
+                gptq[name].quantizer.configure(
+                    args.wbits, perchannel=True, sym=args.sym, mse=False
+                )
+                
+            def add_batch(name):
+                def tmp(_, inp, out):
+                    gptq[name].add_batch(inp[0].data, out.data)
+                return tmp
+            handles = []
+            for name in subset:
+                handles.append(subset[name].register_forward_hook(add_batch(name)))
+            for j in range(args.nsamples):
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+            for h in handles:
+                h.remove()
 
-        def add_batch(name):
-            def tmp(_, inp, out):
-                gptq[name].add_batch(inp[0].data, out.data)
-            return tmp
-        handles = []
-        for name in subset:
-            handles.append(subset[name].register_forward_hook(add_batch(name)))
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
-        for h in handles:
-            h.remove()
-
-        for name in subset:
-            print(i, name)
-            print('Quantizing ...')
-            scale,zero = gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize)
-            quantizers['model.layers.%d.%s' % (i, name)] = (gptq[name].quantizer,scale,zero)
-            gptq[name].free()
+            for name in subset:
+                print(i, name)
+                print('Quantizing ...')
+                scale,zero = gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order)
+                quantizers['model.layers.%d.%s' % (i, name)] = (gptq[name].quantizer,scale,zero)
+                gptq[name].free()
+                
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
 
@@ -217,7 +230,7 @@ def llama_pack(model, quantizers, wbits, groupsize):
     print('Done.')
     return model
 
-def load_quant(model, checkpoint, wbits, groupsize):
+def load_quant(model, checkpoint, wbits, groupsize=-1,faster_kernel=False):
     from transformers import LlamaConfig, LlamaForCausalLM 
     config = LlamaConfig.from_pretrained(model)
     def noop(*args, **kwargs):
@@ -236,8 +249,10 @@ def load_quant(model, checkpoint, wbits, groupsize):
     for name in ['lm_head']:
         if name in layers:
             del layers[name]
-    make_quant(model, layers, wbits, groupsize)
+    make_quant(model, layers, wbits, groupsize, faster=faster_kernel)
 
+    del layers
+    
     print('Loading model ...')
     if checkpoint.endswith('.safetensors'):
         from safetensors.torch import load_file as safe_load
@@ -367,6 +382,10 @@ if __name__ == '__main__':
         help='#bits to use for quantization; use 16 for evaluating base model.'
     )
     parser.add_argument(
+        '--trits', action='store_true',
+        help='Whether to use trits for quantization.'
+    )
+    parser.add_argument(
         '--groupsize', type=int, default=-1,
         help='Groupsize to use for quantization; default uses full row.'
     )
@@ -390,14 +409,33 @@ if __name__ == '__main__':
         '--check', action='store_true',
         help='Whether to compute perplexity during benchmarking for verification.'
     )
-
+    parser.add_argument(
+        '--sym', action='store_true',
+        help='Whether to perform symmetric quantization.'
+    )
+    parser.add_argument(
+        '--act-order', action='store_true',
+        help='Whether to apply the activation order GPTQ heuristic'
+    )
+    parser.add_argument(
+        '--true-sequential', action='store_true',
+        help='Whether to run in true sequential model.'
+    )
+    parser.add_argument(
+        '--new-eval', action='store_true',
+        help='Whether to use the new PTB and C4 eval'
+    )
+    parser.add_argument(
+        '--faster-kernel', action='store_true',
+        help='Whether to use the new faster kernel for benchmarking.'
+    )
     args = parser.parse_args()
 
     if type(args.load) is not str:
         args.load = args.load.as_posix()
     
     if args.load:
-        model = load_quant(args.model, args.load, args.wbits, args.groupsize)
+        model = load_quant(args.model, args.load, args.wbits, args.groupsize, args.faster_kernel)
     else:
         model = get_llama(args.model)
         model.eval()
@@ -423,7 +461,10 @@ if __name__ == '__main__':
     if args.load:
         exit()
 
-    for dataset in ['wikitext2', 'ptb', 'c4']:
+    datasets = ['wikitext2', 'ptb', 'c4'] 
+    if args.new_eval:
+      datasets = ['wikitext2', 'ptb-new', 'c4-new']
+    for dataset in datasets: 
         dataloader, testloader = get_loaders(
             dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
         )
