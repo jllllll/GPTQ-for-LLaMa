@@ -1,3 +1,4 @@
+import math
 import time
 
 import torch
@@ -17,8 +18,9 @@ def get_gptj(model):
     torch.nn.init.normal_ = skip
     from transformers import GPTJForCausalLM
     model = GPTJForCausalLM.from_pretrained(model, torch_dtype='auto')
-    model.seqlen = model.config.max_position_embeddings
+    model.seqlen = 2048
     return model
+
 
 @torch.no_grad()
 def gptj_sequential(model, dataloader, dev):
@@ -28,7 +30,8 @@ def gptj_sequential(model, dataloader, dev):
     model.config.use_cache = False
     layers = model.transformer.h
 
-    model.transformer.wte = model.transformer.wte.to(dev) 
+    model.transformer.wte = model.transformer.wte.to(dev)
+    model.transformer.ln_f = model.transformer.ln_f.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -41,6 +44,7 @@ def gptj_sequential(model, dataloader, dev):
         def __init__(self, module):
             super().__init__()
             self.module = module
+
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp
             cache['i'] += 1
@@ -56,6 +60,7 @@ def gptj_sequential(model, dataloader, dev):
 
     layers[0] = layers[0].cpu()
     model.transformer.wte = model.transformer.wte.cpu()
+    model.transformer.ln_f = model.transformer.ln_f.cpu()
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
@@ -66,47 +71,60 @@ def gptj_sequential(model, dataloader, dev):
     quantizers = {}
     for i in range(len(layers)):
         layer = layers[i].to(dev)
+        full = find_layers(layer)
+        if args.true_sequential:
+            sequential = [
+                ['attn.k_proj', 'attn.v_proj', 'attn.q_proj'],
+                ['attention.out_proj'],
+                ['mlp.fc_in'],
+                ['mlp.fc_out']
+            ]
+        else:
+            sequential = [list(full.keys())]
 
-        subset = find_layers(layer)
-        gptq = {}
-        for name in subset:
-            gptq[name] = GPTQ(subset[name])
-            gptq[name].quantizer = Quantizer()
-            gptq[name].quantizer.configure(
-                args.wbits, perchannel=True, sym=False, mse=False
-            )
+        for names in sequential:
+            subset = {n: full[n] for n in names}
+            gptq = {}
+            for name in subset:
+                gptq[name] = GPTQ(subset[name])
+                gptq[name].quantizer = Quantizer()
+                gptq[name].quantizer.configure(
+                    args.wbits, perchannel=True, sym=args.sym, mse=False
+                )
 
-        def add_batch(name):
-            def tmp(_, inp, out):
-                gptq[name].add_batch(inp[0].data, out.data)
-            return tmp
-        handles = []
-        for name in subset:
-            handles.append(subset[name].register_forward_hook(add_batch(name)))
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
-        for h in handles:
-            h.remove()
+            def add_batch(name):
+                def tmp(_, inp, out):
+                    gptq[name].add_batch(inp[0].data, out.data)
+                return tmp
+            handles = []
+            for name in subset:
+                handles.append(subset[name].register_forward_hook(add_batch(name)))
+            for j in range(args.nsamples):
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+            for h in handles:
+                h.remove()
 
-        for name in subset:
-            print(i, name)
-            print('Quantizing ...')
-            gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize)
-            quantizers['transformer.h.%d.%s' % (i, name)] = gptq[name].quantizer
-            gptq[name].free()
+            for name in subset:
+                print(i, name)
+                print('Quantizing ...')
+                scale, zero = gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order)
+                quantizers['transformer.h.%d.%s' % (i, name)] = (gptq[name].quantizer, scale, zero)
+                gptq[name].free()
+
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
 
         layers[i] = layer.cpu()
         del layer
-        del gptq 
+        del gptq
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
-    
+
     return quantizers
+
 
 @torch.no_grad()
 def gptj_eval(model, testenc, dev):
@@ -132,6 +150,7 @@ def gptj_eval(model, testenc, dev):
         def __init__(self, module):
             super().__init__()
             self.module = module
+
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp
             cache['i'] += 1
@@ -201,28 +220,32 @@ def gptj_eval(model, testenc, dev):
 
     model.config.use_cache = use_cache
 
+
 # TODO: perform packing on GPU
-def gptj_pack(model, quantizers, wbits):
+def gptj_pack(model, quantizers, wbits, groupsize):
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
-    make_quant(model, quantizers, wbits)
+    make_quant(model, quantizers, wbits, groupsize)
     qlayers = find_layers(model, [QuantLinear])
     print('Packing ...')
     for name in qlayers:
         print(name)
-        quantizers[name] = quantizers[name].cpu()
-        qlayers[name].pack(layers[name], quantizers[name].scale, quantizers[name].zero)
+        quantizers[name], scale, zero = quantizers[name]
+        quantizers[name], scale, zero = quantizers[name].cpu(), scale.cpu(), zero.cpu()
+        qlayers[name].pack(layers[name], scale, zero)
     print('Done.')
     return model
 
-def load_quant(model, checkpoint, wbits):
-    from transformers import GPTJConfig, GPTJForCausalLM 
+
+def load_quant(model, checkpoint, wbits, groupsize=-1, faster_kernel=False):
+    from transformers import GPTJConfig, GPTJForCausalLM
     config = GPTJConfig.from_pretrained(model)
+
     def noop(*args, **kwargs):
         pass
-    torch.nn.init.kaiming_uniform_ = noop 
-    torch.nn.init.uniform_ = noop 
-    torch.nn.init.normal_ = noop 
+    torch.nn.init.kaiming_uniform_ = noop
+    torch.nn.init.uniform_ = noop
+    torch.nn.init.ln_fal_ = noop
 
     torch.set_default_dtype(torch.half)
     transformers.modeling_utils._init_weights = False
@@ -231,15 +254,24 @@ def load_quant(model, checkpoint, wbits):
     torch.set_default_dtype(torch.float)
     model = model.eval()
     layers = find_layers(model)
-    if 'lm_head' in layers:
-        del layers['lm_head']
-    make_quant(model, layers, wbits)
+    for name in ['lm_head']:
+        if name in layers:
+            del layers[name]
+    make_quant(model, layers, wbits, groupsize, faster=faster_kernel)
+
+    del layers
 
     print('Loading model ...')
-    model.load_state_dict(torch.load(checkpoint))
-    model.seqlen = model.config.max_position_embeddings
+    if checkpoint.endswith('.safetensors'):
+        from safetensors.torch import load_file as safe_load
+        model.load_state_dict(safe_load(checkpoint))
+    else:
+        model.load_state_dict(torch.load(checkpoint))
+    model.seqlen = 2048
     print('Done.')
+
     return model
+
 
 def gptj_multigpu(model, gpus):
     model.transformer.wte = model.transformer.wte.to(gpus[0])
@@ -255,6 +287,7 @@ def gptj_multigpu(model, gpus):
             super().__init__()
             self.module = module
             self.dev = next(iter(self.module.parameters())).device
+
         def forward(self, *inp, **kwargs):
             inp = list(inp)
             if inp[0].device != self.dev:
@@ -272,11 +305,13 @@ def gptj_multigpu(model, gpus):
 
     model.gpus = gpus
 
+
 def benchmark(model, input_ids, check=False):
     input_ids = input_ids.to(model.gpus[0] if hasattr(model, 'gpus') else DEV)
     torch.cuda.synchronize()
 
     cache = {'past': None}
+
     def clear_past(i):
         def tmp(layer, inp, out):
             if cache['past']:
@@ -297,19 +332,21 @@ def benchmark(model, input_ids, check=False):
                 torch.cuda.synchronize(gpu)
         else:
             torch.cuda.synchronize()
+    max_memory = 0
     with torch.no_grad():
         attention_mask = torch.ones((1, input_ids.numel()), device=DEV)
         times = []
         for i in range(input_ids.numel()):
             tick = time.time()
             out = model(
-                input_ids[:, i].reshape(-1),
+                input_ids[:, i:i+1],
                 past_key_values=cache['past'],
                 attention_mask=attention_mask[:, :(i + 1)].reshape((1, -1))
             )
             sync()
             times.append(time.time() - tick)
             print(i, times[-1])
+            max_memory = max(max_memory,torch.cuda.memory_allocated() / 1024 / 1024)
             if check and i != input_ids.numel() - 1:
                 tot += loss(out.logits[0].to(DEV), input_ids[:, (i + 1)].to(DEV)).float()
             cache['past'] = list(out.past_key_values)
@@ -319,6 +356,7 @@ def benchmark(model, input_ids, check=False):
         print('Median:', np.median(times))
         if check:
             print('PPL:', torch.exp(tot / (input_ids.numel() - 1)).item())
+            print('max memory(MiB):', max_memory)
 
 
 if __name__ == '__main__':
@@ -329,7 +367,7 @@ if __name__ == '__main__':
 
     parser.add_argument(
         'model', type=str,
-        help='GPT-NeoX model to load; pass `EleutherAI/gpt-neox-20b`.'
+        help='gptj model to load'
     )
     parser.add_argument(
         'dataset', type=str, choices=['wikitext2', 'ptb', 'c4'],
@@ -350,10 +388,14 @@ if __name__ == '__main__':
     parser.add_argument(
         '--nearest', action='store_true',
         help='Whether to run the RTN baseline.'
-    ) 
+    )
     parser.add_argument(
         '--wbits', type=int, default=16, choices=[2, 3, 4, 8, 16],
         help='#bits to use for quantization; use 16 for evaluating base model.'
+    )
+    parser.add_argument(
+        '--trits', action='store_true',
+        help='Whether to use trits for quantization.'
     )
     parser.add_argument(
         '--groupsize', type=int, default=-1,
@@ -362,6 +404,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--save', type=str, default='',
         help='Save quantized checkpoint under this name.'
+    )
+    parser.add_argument(
+        '--save_safetensors', type=str, default='',
+        help='Save quantized `.safetensors` checkpoint under this name.'
     )
     parser.add_argument(
         '--load', type=str, default='',
@@ -375,17 +421,39 @@ if __name__ == '__main__':
         '--check', action='store_true',
         help='Whether to compute perplexity during benchmarking for verification.'
     )
-
+    parser.add_argument(
+        '--sym', action='store_true',
+        help='Whether to perform symmetric quantization.'
+    )
+    parser.add_argument(
+        '--act-order', action='store_true',
+        help='Whether to apply the activation order GPTQ heuristic'
+    )
+    parser.add_argument(
+        '--true-sequential', action='store_true',
+        help='Whether to run in true sequential model.'
+    )
+    parser.add_argument(
+        '--new-eval', action='store_true',
+        help='Whether to use the new PTB and C4 eval'
+    )
+    parser.add_argument(
+        '--faster-kernel', action='store_true',
+        help='Whether to use the new faster kernel for benchmarking.'
+    )
     args = parser.parse_args()
 
+    if type(args.load) is not str:
+        args.load = args.load.as_posix()
+    
     if args.load:
-        model = load_quant(args.model, args.load, args.wbits)
+        model = load_quant(args.model, args.load, args.wbits, args.groupsize, args.faster_kernel)
     else:
         model = get_gptj(args.model)
         model.eval()
 
     dataloader, testloader = get_loaders(
-        args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
+        args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen, use_fast=True,
     )
 
     if not args.load and args.wbits < 16 and not args.nearest:
@@ -405,13 +473,21 @@ if __name__ == '__main__':
     if args.load:
         exit()
 
-    for dataset in ['wikitext2', 'ptb', 'c4']:
+    datasets = ['wikitext2', 'ptb', 'c4']
+    if args.new_eval:
+        datasets = ['wikitext2', 'ptb-new', 'c4-new']
+    for dataset in datasets: 
         dataloader, testloader = get_loaders(
-            dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            dataset, seed=args.seed, model=args.model, seqlen=model.seqlen, use_fast=True,
         )
         print(dataset)
         gptj_eval(model, testloader, DEV)
 
     if args.save:
-        gptj_pack(model, quantizers, args.wbits)
-        torch.save(model.state_dict(), args.save) 
+        gptj_pack(model, quantizers, args.wbits, args.groupsize)
+        torch.save(model.state_dict(), args.save)
+
+    if args.save_safetensors:
+        gptj_pack(model, quantizers, args.wbits, args.groupsize)
+        from safetensors.torch import save_file as safe_save
+        safe_save(model.state_dict(), args.save_safetensors)
