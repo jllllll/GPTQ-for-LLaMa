@@ -30,13 +30,13 @@ class OldQuantLinear(torch.nn.Module):
         dtype = x.dtype
         x = x.float()
         if self.bits == 2:
-            quant_cuda_old.vecquant2matmul(x, self.qweight, y, self.scales, self.zeros)
+            quant_cuda_old.vecquant2matmul(x, self.qweight, y, self.scales.float(), self.zeros.float())
         elif self.bits == 3:
-            quant_cuda_old.vecquant3matmul(x, self.qweight, y, self.scales, self.zeros)
+            quant_cuda_old.vecquant3matmul(x, self.qweight, y, self.scales.float(), self.zeros.float())
         elif self.bits == 4:
-            quant_cuda_old.vecquant4matmul(x, self.qweight, y, self.scales, self.zeros)
+            quant_cuda_old.vecquant4matmul(x, self.qweight, y, self.scales.float(), self.zeros.float())
         elif self.bits == 8:
-            quant_cuda_old.vecquant8matmul(x, self.qweight, y, self.scales, self.zeros)
+            quant_cuda_old.vecquant8matmul(x, self.qweight, y, self.scales.float(), self.zeros.float())
         else:
             raise NotImplementedError("Only 2,3,4,8 bits are supported.")
         y = y.to(dtype)

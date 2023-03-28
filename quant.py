@@ -419,13 +419,13 @@ class QuantLinear(nn.Module):
         else:
             x = x.float()
             if self.bits == 2:
-                quant_cuda.vecquant2matmul(x, self.qweight, y, self.scales, self.qzeros, self.groupsize)
+                quant_cuda.vecquant2matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
             elif self.bits == 3:
-                quant_cuda.vecquant3matmul(x, self.qweight, y, self.scales, self.qzeros, self.groupsize)
+                quant_cuda.vecquant3matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
             elif self.bits == 4:
-                quant_cuda.vecquant4matmul(x, self.qweight, y, self.scales, self.qzeros, self.groupsize)
+                quant_cuda.vecquant4matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
             elif self.bits == 8:
-                quant_cuda.vecquant8matmul(x, self.qweight, y, self.scales, self.qzeros, self.groupsize)
+                quant_cuda.vecquant8matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
             else:
                 raise NotImplementedError("Only 2,3,4,8 bits are supported.")
         y = y.to(output_dtype)
