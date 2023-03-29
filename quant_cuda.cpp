@@ -1,6 +1,6 @@
 #include <torch/all.h>
 #include <torch/python.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 
 void vecquant2matmul_cuda(
   torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
@@ -13,7 +13,7 @@ void vecquant2matmul(
   torch::Tensor scales, torch::Tensor zeros,
   int groupsize
 ) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(vec));
   vecquant2matmul_cuda(vec, mat, mul, scales, zeros,groupsize);
 }
 
@@ -28,7 +28,7 @@ void vecquant3matmul(
   torch::Tensor scales, torch::Tensor zeros,
   int groupsize
 ) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(vec));
   vecquant3matmul_cuda(vec, mat, mul, scales, zeros, groupsize);
 }
 
@@ -43,7 +43,7 @@ void vecquant4matmul(
   torch::Tensor scales, torch::Tensor zeros,
   int groupsize
 ) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(vec));
   vecquant4matmul_cuda(vec, mat, mul, scales, zeros, groupsize);
 }
 
@@ -58,7 +58,7 @@ void vecquant8matmul(
   torch::Tensor scales, torch::Tensor zeros,
   int groupsize
 ) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(vec));
   vecquant8matmul_cuda(vec, mat, mul, scales, zeros, groupsize);
 }
 
@@ -73,7 +73,7 @@ void vecquant2matmul_faster(
   torch::Tensor scales, torch::Tensor zeros,
   int groupsize, int vec_height
 ) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(vec));
   vecquant2matmul_faster_cuda(vec, mat, mul, scales, zeros, groupsize, vec_height);
 }
 
@@ -88,7 +88,7 @@ void vecquant3matmul_faster(
   torch::Tensor scales, torch::Tensor zeros,
   int groupsize, int vec_height
 ) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(vec));
   vecquant3matmul_faster_cuda(vec, mat, mul, scales, zeros, groupsize, vec_height);
 }
 
@@ -103,7 +103,7 @@ void vecquant4matmul_faster(
   torch::Tensor scales, torch::Tensor zeros,
   int groupsize, int vec_height
 ) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(vec));
   vecquant4matmul_faster_cuda(vec, mat, mul, scales, zeros, groupsize, vec_height);
 }
 
