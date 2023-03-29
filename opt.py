@@ -457,7 +457,7 @@ if __name__ == '__main__':
 
     if type(args.load) is not str:
         args.load = args.load.as_posix()
-    
+
     if args.load:
         model = load_quant(args.model, args.load, args.wbits, args.groupsize, args.faster_kernel)
     else:
@@ -473,6 +473,26 @@ if __name__ == '__main__':
         quantizers = opt_sequential(model, dataloader, DEV)
         print(time.time() - tick)
 
+    if args.eval:
+        datasets = ['wikitext2', 'ptb', 'c4']
+        if args.new_eval:
+          datasets = ['wikitext2', 'ptb-new', 'c4-new']
+        for dataset in datasets:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            print(dataset)
+            opt_eval(model, testloader, DEV)
+
+    if args.save:
+        opt_pack(model, quantizers, args.wbits, args.groupsize)
+        torch.save(model.state_dict(), args.save)
+
+    if args.save_safetensors:
+        opt_pack(model, quantizers, args.wbits, args.groupsize)
+        from safetensors.torch import save_file as safe_save
+        safe_save(model.state_dict(), args.save_safetensors)
+
     if args.benchmark:
         gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
         if len(gpus) > 1:
@@ -482,24 +502,3 @@ if __name__ == '__main__':
         if args.benchmark:
             input_ids = next(iter(dataloader))[0][:, :args.benchmark]
             benchmark(model, input_ids, check=args.check)
-    if args.load:
-        exit()
-
-    if args.save:
-        opt_pack(model, quantizers, args.wbits, args.groupsize)
-        torch.save(model.state_dict(), args.save) 
-
-    if args.save_safetensors:
-        opt_pack(model, quantizers, args.wbits, args.groupsize)
-        from safetensors.torch import save_file as safe_save
-        safe_save(model.state_dict(), args.save_safetensors)
-
-    datasets = ['wikitext2', 'ptb', 'c4'] 
-    if args.new_eval:
-      datasets = ['wikitext2', 'ptb-new', 'c4-new']
-    for dataset in datasets: 
-        dataloader, testloader = get_loaders(
-            dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-        )
-        print(dataset)
-        opt_eval(model, testloader, DEV)
