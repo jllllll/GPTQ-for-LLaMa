@@ -1,8 +1,8 @@
 #include <torch/all.h>
 #include <torch/python.h>
-#include <hip/hip_runtime.h>
-
-#include <hip/hip_fp16.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 /*
 
@@ -29,35 +29,40 @@ Changes from the original HIPified version of the cuda kernel in order for it to
  3. Commented the atomicAdd function implementation below as it would complain of redefinition
     in hipify. No idea if the function might be necessary to support older AMD GPUs like it
     does for older NVidia GPUs.
+    
+    Note on 3: I reverted this change, it appears to have no effect on my system in rocm.
+      Build threw no errors and no issues running 4bit models with the atomicAdd function
+      as-is.  --nerodia
 
-Original lines have been commented. You can CTRL+F the original lines if you wish to see it.
+ 4. Reverted HIPification. It appears to have been unnecessary.
+    
 */
 
 // atomicAdd for double-precision floating-point numbers on hardware with
 // compute capability < 6.0 from:
 // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#atomic-functions
-// #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
-// __device__ double atomicAdd(
-//     double* address,
-//     double val
-// ) {
-//   unsigned long long int* address_as_ull = (unsigned long long int*)address;
-//   unsigned long long int old = *address_as_ull, assumed;
-// 
-//   do {
-//     assumed = old;
-//     old = atomicCAS(
-//       address_as_ull,
-//       assumed,
-//       __double_as_longlong(val + __longlong_as_double(assumed))
-//     );
-// 
-//   // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
-//   } while (assumed != old);
-// 
-//   return __longlong_as_double(old);
-// }
-// #endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
+__device__ double atomicAdd(
+    double* address,
+    double val
+) {
+  unsigned long long int* address_as_ull = (unsigned long long int*)address;
+  unsigned long long int old = *address_as_ull, assumed;
+
+  do {
+    assumed = old;
+    old = atomicCAS(
+      address_as_ull,
+      assumed,
+      __double_as_longlong(val + __longlong_as_double(assumed))
+    );
+
+  // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
+  } while (assumed != old);
+
+  return __longlong_as_double(old);
+}
+#endif
 
 template <typename scalar_t>
 __global__ void VecQuant2MatMulKernel(
@@ -194,7 +199,7 @@ void vecquant2matmul_cuda(
 
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant2matmul_cuda", ([&] {
-     hipLaunchKernelGGL(( VecQuant2MatMulKernel), dim3(blocks), dim3(threads), 0, 0, 
+      VecQuant2MatMulKernel<<<blocks, threads>>>(
         vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
         scales.data<scalar_t>(), zeros.data<int>(),
         batch, vec_height, height, width, zero_width, groupsize
@@ -289,7 +294,7 @@ void vecquant3matmul_cuda(
 
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant3matmul_cuda", ([&] {
-     hipLaunchKernelGGL(( VecQuant3MatMulKernel), dim3(blocks), dim3(threads), 0, 0, 
+      VecQuant3MatMulKernel<<<blocks, threads>>>(
         vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
         scales.data<scalar_t>(), zeros.data<int>(),
         batch, vec_height, height, width, zero_width, groupsize
@@ -448,7 +453,7 @@ void vecquant4matmul_cuda(
 
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant4matmul_cuda", ([&] {
-     hipLaunchKernelGGL(( VecQuant4MatMulKernel), dim3(blocks), dim3(threads), 0, 0, 
+      VecQuant4MatMulKernel<<<blocks, threads>>>(
         vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
         scales.data<scalar_t>(), zeros.data<int>(),
         batch, vec_height, height, width, zero_width, groupsize
@@ -535,7 +540,7 @@ void vecquant8matmul_cuda(
 
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant8matmul_cuda", ([&] {
-     hipLaunchKernelGGL(( VecQuant8MatMulKernel), dim3(blocks), dim3(threads), 0, 0, 
+      VecQuant8MatMulKernel<<<blocks, threads>>>(
         vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
         scales.data<scalar_t>(), zeros.data<int>(),
         batch, vec_height, height, width, zero_width, groupsize
@@ -617,7 +622,7 @@ void vecquant2matmul_faster_cuda(
   );
   dim3 threads(BLOCKWIDTH);
 
- hipLaunchKernelGGL(( VecQuant2MatMulKernelFaster), dim3(blocks), dim3(threads), 0, 0, 
+  VecQuant2MatMulKernelFaster<<<blocks, threads>>>(
     (half2*) vec.data_ptr(),
     mat.data_ptr<int>(),
     mul.data_ptr<float>(),
@@ -721,7 +726,7 @@ void vecquant3matmul_faster_cuda(
   );
   dim3 threads(BLOCKWIDTH);
 
- hipLaunchKernelGGL(( VecQuant3MatMulKernelFaster), dim3(blocks), dim3(threads), 0, 0, 
+  VecQuant3MatMulKernelFaster<<<blocks, threads>>>(
     (half2*) vec.data_ptr(),
     mat.data_ptr<int>(),
     mul.data_ptr<float>(),
@@ -877,7 +882,7 @@ void vecquant4matmul_faster_cuda(
   );
   dim3 threads(BLOCKWIDTH);
 
- hipLaunchKernelGGL(( VecQuant4MatMulKernelFaster), dim3(blocks), dim3(threads), 0, 0, 
+  VecQuant4MatMulKernelFaster<<<blocks, threads>>>(
     (half2*) vec.data_ptr(),
     mat.data_ptr<int>(),
     mul.data_ptr<float>(),
