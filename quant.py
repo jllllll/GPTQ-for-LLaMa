@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import math
 
+import quant_cuda
+
 def quantize(x, scale, zero, maxq):
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
@@ -128,11 +130,6 @@ class Quantizer(nn.Module):
     def ready(self):
         return torch.all(self.scale != 0)
 
-
-try:
-    import quant_cuda
-except:
-    print('CUDA extension not installed.')
 
 # Assumes layer is perfectly divisible into 256 * 256 blocks
 class QuantLinear(nn.Module): 

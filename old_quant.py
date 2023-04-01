@@ -1,10 +1,6 @@
 import torch
 
-
-try:
-    import quant_cuda_old
-except:
-    print("CUDA extension not installed.")
+import quant_cuda_old
 
 
 # Assumes layer is perfectly divisible into 256 * 256 blocks
