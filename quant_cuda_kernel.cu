@@ -4,31 +4,39 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-// atomicAdd for double-precision floating-point numbers on hardware with
-// compute capability < 6.0 from:
-// https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#atomic-functions
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
-__device__ double atomicAdd(
-    double* address,
-    double val
-) {
-  unsigned long long int* address_as_ull = (unsigned long long int*)address;
-  unsigned long long int old = *address_as_ull, assumed;
+/*
 
-  do {
-    assumed = old;
-    old = atomicCAS(
-      address_as_ull,
-      assumed,
-      __double_as_longlong(val + __longlong_as_double(assumed))
-    );
+Changes from the original HIPified version of the cuda kernel in order for it to compile.
 
-  // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
-  } while (assumed != old);
+1. Replaced 3 instances of:
+	'res2 = {};'
+   To:
+   	'std::memset(&res2, 0, sizeof(half2));'
+   Reason:
+   	When hipifying this line it would give the error that the assignment
+	operator for half2 is ambiguous. Solution was to simply initialize its memory
+	as pure zeros.
 
-  return __longlong_as_double(old);
-}
-#endif
+2. Changed 3 instances of this line:
+	res += __half2float(res2.x) + __half2float(res2.y);
+   To:
+	float2 res2float = __half22float2(res2);
+	res += res2float.x + res2float.y;
+   Reason:
+   	Conversion from unsigned short to __half seems to not work in HIP.
+	Workaround is to use __half22float2() instead then adding the float vector's
+	members into res like the original line intended.
+ 3. Commented the atomicAdd function implementation below as it would complain of redefinition
+    in hipify. No idea if the function might be necessary to support older AMD GPUs like it
+    does for older NVidia GPUs.
+    
+    Note on 3: I reverted this change, it appears to have no effect on my system in rocm.
+      Build threw no errors and no issues running 4bit models with the atomicAdd function
+      as-is.  --nerodia
+
+ 4. Reverted HIPification. It appears to have been unnecessary.
+    
+*/
 
 // atomicAdd for double-precision floating-point numbers on hardware with
 // compute capability < 6.0 from:
@@ -675,7 +683,8 @@ __global__ void VecQuant2MatMulKernelFaster(
     half2 scale = __float2half2_rn(scale_f);
     half2 zero = __float2half2_rn(-(scale_f * (((as_unsigned(zeros[g * zero_width + z_w]) >> z_mod) & 0x3) + 1)));
 	
-    res2 = {};
+    //res2 = {};
+    std::memset(&res2, 0, sizeof(half2));
     tmp = as_unsigned(mat[i]);
     res2 = __hfma2(__hfma2(deq2[(tmp >>  0) & 0xf][off], scale, zero), blockvec[k + 0], res2);
     res2 = __hfma2(__hfma2(deq2[(tmp >>  4) & 0xf][off], scale, zero), blockvec[k + 1], res2);
@@ -687,7 +696,10 @@ __global__ void VecQuant2MatMulKernelFaster(
     res2 = __hfma2(__hfma2(deq2[(tmp >> 28) & 0xf][off], scale, zero), blockvec[k + 7], res2);
 	i += width;
     k += 8;
-    res += __half2float(res2.x) + __half2float(res2.y);
+    //res += __half2float(res2.x) + __half2float(res2.y);
+    
+    float2 res2float = __half22float2(res2);
+    res += res2float.x + res2float.y;
   }
 
   atomicAdd(&mul[b * width + w], res);
@@ -809,7 +821,8 @@ __global__ void VecQuant3MatMulKernelFaster(
       zero = __float2half2_rn(-(scale_f * (((as_unsigned(zeros[g * zero_width + z_w]) >> z_bit) & 0x7) + 1)));
     }
 	
-    res2 = {};
+    //res2 = {};
+    std::memset(&res2, 0, sizeof(half2));
     tmp1 = as_unsigned(mat[i]);
     res2 = __hfma2(__hfma2(deq2[(tmp1 >>  0) & 0x3f][off], scale, zero), blockvec[k + 0], res2);
     res2 = __hfma2(__hfma2(deq2[(tmp1 >>  6) & 0x3f][off], scale, zero), blockvec[k + 1], res2);
@@ -839,7 +852,10 @@ __global__ void VecQuant3MatMulKernelFaster(
     res2 = __hfma2(__hfma2(deq2[(tmp1 >> 24) & 0x3f][off], scale, zero), blockvec[k + 4], res2);
     i += width;
     k += 5;
-    res += __half2float(res2.x) + __half2float(res2.y);
+    //res += __half2float(res2.x) + __half2float(res2.y);
+    
+    float2 res2float = __half22float2(res2); 
+    res += res2float.x + res2float.y;
   }
 
   atomicAdd(&mul[b * width + w], res);
@@ -927,7 +943,8 @@ __global__ void VecQuant4MatMulKernelFaster(
     half2 scale = __float2half2_rn(scale_f);
     half2 zero = __float2half2_rn(-(scale_f * (((as_unsigned(zeros[g * zero_width + z_w]) >> z_mod) & 0xF) + 1)));
 	
-    res2 = {};
+    //res2 = {};
+    std::memset(&res2, 0, sizeof(half2));
     tmp = as_unsigned(mat[i]);
     res2 = __hfma2(__hfma2(deq2[(tmp >>  0) & 0xff][off], scale, zero), blockvec[k + 0], res2);
     res2 = __hfma2(__hfma2(deq2[(tmp >>  8) & 0xff][off], scale, zero), blockvec[k + 1], res2);
@@ -935,7 +952,10 @@ __global__ void VecQuant4MatMulKernelFaster(
     res2 = __hfma2(__hfma2(deq2[(tmp >> 24) & 0xff][off], scale, zero), blockvec[k + 3], res2);
 	i += width;
     k += 4;
-    res += __half2float(res2.x) + __half2float(res2.y);
+    //res += __half2float(res2.x) + __half2float(res2.y);
+    
+    float2 res2float = __half22float2(res2);
+    res += res2float.x + res2float.y;
   }
 
   atomicAdd(&mul[b * width + w], res);
