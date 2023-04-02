@@ -1,5 +1,4 @@
 import torch
-import gc
 
 import transformers
 from transformers.models.llama.modeling_llama import LlamaModel, LlamaConfig
@@ -143,18 +142,19 @@ def offload_forward(
 
     for idx in range(len(self.layers)):
         decoder_layer = self.layers[idx]
+        device = next(decoder_layer.parameters()).device
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
         past_key_value = past_key_values[idx] if past_key_values is not None else None
 
-        # if hidden_states.device != decoder_layer.device:
-        #     # Move auxiliary values
-        #     hidden_states = hidden_states.to(gpu, hidden_states.dtype, no_blocking=True)
-        #     attention_mask = attention_mask.to(gpu, attention_mask.dtype, no_blocking=True)
-        #     position_ids = position_ids.to(gpu, position_ids.dtype, no_blocking=True)
-        #     past_key_value = past_key_value.to(gpu, past_key_value.dtype, no_blocking=True)
+
+        if device != hidden_states.device:
+            # Move auxiliary values
+            hidden_states = hidden_states.to(device, hidden_states.dtype, True)
+            attention_mask = attention_mask.to(device, attention_mask.dtype, True)
+            position_ids = position_ids.to(device, position_ids.dtype, True)
 
         if self.gradient_checkpointing and self.training:
 
@@ -191,7 +191,6 @@ def offload_forward(
         )
         del decoder_layer
         torch.cuda.empty_cache()
-        gc.collect()
 
         next_cpu_layer += 1
         gpu_layer_counter -= 1
@@ -282,6 +281,7 @@ def load_quant_offload(
     for gpu, pre_layer in gpu_order:
         for i in range(layers_done, layers_done + pre_layer):
             model.model.layers[i].to(gpu)
+        layers_done += pre_layer
 
     model.model.embed_tokens.to(gpu_order[0][0])
     model.model.norm.to(gpu_order[0][0])
