@@ -910,6 +910,9 @@ def load_quant_offload(
     m.cpu_layers = len(layers) - layers_done
     m.gpu_layers = layers_done
 
+    if "layers" not in dir(m):
+        m.layers = layers
+
     for i in range(layers_done, len(layers)):
         layers[i].to(m.cpu_device, torch.float32, False)
 
