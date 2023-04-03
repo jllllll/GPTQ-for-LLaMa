@@ -8,14 +8,6 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from typing import List, Optional, Tuple, Union
 
 
-def offload_setup(self):
-    gpu_idx = 0
-    gpu, gpu_layer_counter = self.gpu_order[gpu_idx]
-    next_cpu_layer = sum([gpu[1] for gpu in self.gpu_order])
-
-    return gpu_idx, gpu, gpu_layer_counter, next_cpu_layer
-
-
 def offload_loop_start(self, idx, hidden_states, attention_mask, position_ids):
     decoder_layer = self.layers[idx]
     device = next(decoder_layer.parameters()).device
@@ -30,35 +22,37 @@ def offload_loop_start(self, idx, hidden_states, attention_mask, position_ids):
         attention_mask = attention_mask.to(device, dtype, True)
         position_ids = position_ids.to(device, dtype, True)
 
-    return decoder_layer, device, hidden_states, attention_mask, position_ids
+    return decoder_layer, hidden_states, attention_mask, position_ids
 
 
-def offload_loop_end(
-    self, idx, decoder_layer, next_cpu_layer, gpu, gpu_layer_counter, gpu_idx
-):
+def offload_loop_end(self, idx):
+    gpu = next(self.layers[idx].parameters()).device
     # Move one layer off the GPU(s), and one onto a GPU
-    self.layers[idx] = decoder_layer.to(self.cpu_device, torch.float16, True)
-    self.layers[next_cpu_layer] = self.layers[next_cpu_layer].to(
-        gpu, torch.float16, True
-    )
-    del decoder_layer
-    torch.cuda.empty_cache()
+    if not self.fast_offload:
+        self.layers[idx].to(self.cpu_device, torch.float16, True)
+        next_cpu_layer = (idx + self.gpu_layers) % self.layer_count
+        self.layers[next_cpu_layer].to(
+            gpu, torch.float16, True
+        )
+    elif idx < self.cpu_layers:
+        self.layers[idx].to(self.cpu_device, torch.float16, True)
+        next_cpu_layer = self.layer_count - idx - 1
+        self.layers[next_cpu_layer].to(
+            gpu, torch.float16, True
+        )
 
-    next_cpu_layer += 1
-    gpu_layer_counter -= 1
 
-    if next_cpu_layer >= len(self.layers):
-        next_cpu_layer = 0
-        gpu_idx = 0
-        gpu, gpu_layer_counter = self.gpu_order[gpu_idx]
+def offload_cleanup(self):
+    if not self.fast_offload:
+        return
 
-    if gpu_layer_counter <= 0:
-        gpu_idx += 1
-        if gpu_idx >= len(self.gpu_order):
-            gpu_idx = 0
-        gpu, gpu_layer_counter = self.gpu_order[gpu_idx]
-
-    return next_cpu_layer, gpu_layer_counter, gpu_idx, gpu
+    for idx in range(0, self.cpu_layers):
+        next_cpu_layer = self.layer_count - idx - 1
+        device = next(self.layers[next_cpu_layer].parameters()).device
+        self.layers[next_cpu_layer].to(
+            self.cpu_device, torch.float16, True
+        )
+        self.layers[idx].to(device, torch.float16, True)
 
 
 def llama_offload_forward(
@@ -189,12 +183,9 @@ def llama_offload_forward(
     all_self_attns = () if output_attentions else None
     next_decoder_cache = () if use_cache else None
 
-    gpu_idx, gpu, gpu_layer_counter, next_cpu_layer = offload_setup(self)
-
     for idx in range(len(self.layers)):
         (
             decoder_layer,
-            device,
             hidden_states,
             attention_mask,
             position_ids,
@@ -233,8 +224,8 @@ def llama_offload_forward(
 
         hidden_states = layer_outputs[0]
 
-        next_cpu_layer, gpu_layer_counter, gpu_idx, gpu = offload_loop_end(
-            self, idx, decoder_layer, next_cpu_layer, gpu, gpu_layer_counter, gpu_idx
+        offload_loop_end(
+            self, idx
         )
 
         if use_cache:
@@ -242,6 +233,8 @@ def llama_offload_forward(
 
         if output_attentions:
             all_self_attns += (layer_outputs[1],)
+
+    offload_cleanup(self)
 
     hidden_states = self.norm(hidden_states)
 
@@ -372,10 +365,8 @@ def gptneox_offload_forward(
     all_attentions = () if output_attentions else None
     all_hidden_states = () if output_hidden_states else None
 
-    gpu_idx, gpu, gpu_layer_counter, next_cpu_layer = offload_setup(self)
-
     for i, (layer, layer_past) in enumerate(zip(self.layers, past_key_values)):
-        layer, device, hidden_states, attention_mask, position_ids = offload_loop_start(
+        layer, hidden_states, attention_mask, position_ids = offload_loop_start(
             self, i, hidden_states, attention_mask, position_ids
         )
 
@@ -409,13 +400,15 @@ def gptneox_offload_forward(
                 output_attentions=output_attentions,
             )
         hidden_states = outputs[0]
-        next_cpu_layer, gpu_layer_counter, gpu_idx, gpu = offload_loop_end(
-            self, i, layer, next_cpu_layer, gpu, gpu_layer_counter, gpu_idx
+        offload_loop_end(
+            self, i
         )
         if use_cache is True:
             presents = presents + (outputs[1],)
         if output_attentions:
             all_attentions = all_attentions + (outputs[2 if use_cache else 1],)
+
+    offload_cleanup(self)
 
     hidden_states = self.final_layer_norm(hidden_states)
     # Add last hidden state
@@ -550,10 +543,8 @@ def gptj_offload_forward(
     all_self_attentions = () if output_attentions else None
     all_hidden_states = () if output_hidden_states else None
 
-    gpu_idx, gpu, gpu_layer_counter, next_cpu_layer = offload_setup(self)
-
     for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
-        block, device, hidden_states, attention_mask, position_ids = offload_loop_start(
+        block, hidden_states, attention_mask, position_ids = offload_loop_start(
             self, i, hidden_states, attention_mask, position_ids
         )
         # Model parallel
@@ -604,8 +595,8 @@ def gptj_offload_forward(
         if use_cache is True:
             presents = presents + (outputs[1],)
 
-        next_cpu_layer, gpu_layer_counter, gpu_idx, gpu = offload_loop_end(
-            self, i, block, next_cpu_layer, gpu, gpu_layer_counter, gpu_idx
+        offload_loop_end(
+            self, i
         )
 
         if output_attentions:
@@ -618,6 +609,8 @@ def gptj_offload_forward(
             for k, v in self.device_map.items():
                 if i == v[-1] and "cuda:" + str(k) != self.last_device:
                     hidden_states = hidden_states.to("cuda:" + str(k + 1))
+
+    offload_cleanup(self)
 
     hidden_states = self.ln_f(hidden_states)
 
@@ -775,12 +768,9 @@ def opt_offload_forward(
                     f" {head_mask.size()[0]}."
                 )
 
-    gpu_idx, gpu, gpu_layer_counter, next_cpu_layer = offload_setup(self)
-
     for idx, decoder_layer in enumerate(self.layers):
         (
             decoder_layer,
-            device,
             hidden_states,
             attention_mask,
             position_ids,
@@ -823,8 +813,8 @@ def opt_offload_forward(
 
         hidden_states = layer_outputs[0]
 
-        next_cpu_layer, gpu_layer_counter, gpu_idx, gpu = offload_loop_end(
-            self, idx, decoder_layer, next_cpu_layer, gpu, gpu_layer_counter, gpu_idx
+        offload_loop_end(
+            self, idx
         )
 
         if use_cache:
@@ -832,6 +822,8 @@ def opt_offload_forward(
 
         if output_attentions:
             all_self_attns += (layer_outputs[1],)
+
+    offload_cleanup(self)
 
     if self.final_layer_norm is not None:
         hidden_states = self.final_layer_norm(hidden_states)
@@ -913,13 +905,15 @@ def load_quant_offload(
         layers_done += pre_layer
 
     m.cpu_device = torch.device("cpu")
+    m.fast_offload = layers_done > len(layers) // 2
+    m.layer_count = len(layers)
+    m.cpu_layers = len(layers) - layers_done
+    m.gpu_layers = layers_done
 
     for i in range(layers_done, len(layers)):
         layers[i].to(m.cpu_device, torch.float32, False)
 
     for module in remaining:
         module.to(gpu_order[0][0])
-
-    m.gpu_order = gpu_order
 
     return model
