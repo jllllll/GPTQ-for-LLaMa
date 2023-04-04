@@ -48,8 +48,8 @@ def gptj_sequential(model, dataloader, dev):
             super().__init__()
             self.module = module
 
-        def forward(self, inp, **kwargs):
-            inps[cache["i"]] = inp
+        def forward(self, hidden_states, **kwargs):
+            inps[cache["i"]] = hidden_states
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
