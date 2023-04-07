@@ -133,7 +133,7 @@ class Quantizer(nn.Module):
 
 # Assumes layer is perfectly divisible into 256 * 256 blocks
 class QuantLinear(nn.Module): 
-    def __init__(self, bits, groupsize, infeatures, outfeatures, faster=False, kernel_switch_threshold=128):
+    def __init__(self, bits, groupsize, infeatures, outfeatures, kernel_switch_threshold=128):
         super().__init__()
         if bits not in [2,3,4,8]:
             raise NotImplementedError("Only 2,3,4,8 bits are supported.")
@@ -152,7 +152,6 @@ class QuantLinear(nn.Module):
         )
         self.half_indim = self.infeatures // 2
         self._initialized_quant_state = False
-        self.faster = faster
         # kernel_switch_threshold is the cutoff input size after which matmul
         # is performed by unpacking the weights and using torch.matmul
         self.kernel_switch_threshold = kernel_switch_threshold
@@ -404,32 +403,21 @@ class QuantLinear(nn.Module):
             y = self.bias.clone().repeat(x.shape[0], 1)
 
         output_dtype = x.dtype
-        if self.faster:
-            x = x.half()
-            if self.bits == 2:
-                quant_cuda.vecquant2matmul_faster(x, self.qweight, y, self.scales, self.qzeros, self.groupsize, self.half_indim)
-            elif self.bits == 3:
-                quant_cuda.vecquant3matmul_faster(x, self.qweight, y, self.scales, self.qzeros, self.groupsize, self.half_indim)
-            elif self.bits == 4:
-                quant_cuda.vecquant4matmul_faster(x, self.qweight, y, self.scales, self.qzeros, self.groupsize, self.half_indim)
-            else:
-                raise NotImplementedError("Only 2,3,4 bits are supported.")
+        x = x.float()
+        if self.bits == 2:
+            quant_cuda.vecquant2matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
+        elif self.bits == 3:
+            quant_cuda.vecquant3matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
+        elif self.bits == 4:
+            quant_cuda.vecquant4matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
+        elif self.bits == 8:
+            quant_cuda.vecquant8matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
         else:
-            x = x.float()
-            if self.bits == 2:
-                quant_cuda.vecquant2matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
-            elif self.bits == 3:
-                quant_cuda.vecquant3matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
-            elif self.bits == 4:
-                quant_cuda.vecquant4matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
-            elif self.bits == 8:
-                quant_cuda.vecquant8matmul(x, self.qweight, y, self.scales.float(), self.qzeros, self.groupsize)
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+            raise NotImplementedError("Only 2,3,4,8 bits are supported.")
         y = y.to(output_dtype)
         return y.reshape(outshape)
 
-def make_quant(module, names, bits, groupsize, faster=False, name='', kernel_switch_threshold=128):
+def make_quant(module, names, bits, groupsize, name='', kernel_switch_threshold=128):
     if isinstance(module, QuantLinear):
         return
     for attr in dir(module):
@@ -438,7 +426,7 @@ def make_quant(module, names, bits, groupsize, faster=False, name='', kernel_swi
         if name1 in names:
             delattr(module, attr)
             setattr(
-                module, attr, QuantLinear(bits, groupsize, tmp.in_features, tmp.out_features, faster=faster, kernel_switch_threshold=kernel_switch_threshold)
+                module, attr, QuantLinear(bits, groupsize, tmp.in_features, tmp.out_features, kernel_switch_threshold=kernel_switch_threshold)
             )
     for name1, child in module.named_children():
-        make_quant(child, names, bits, groupsize, faster, name + '.' + name1 if name != '' else name1, kernel_switch_threshold=kernel_switch_threshold)
+        make_quant(child, names, bits, groupsize, name + '.' + name1 if name != '' else name1, kernel_switch_threshold=kernel_switch_threshold)

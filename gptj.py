@@ -266,7 +266,7 @@ def gptj_pack(model, quantizers, wbits, groupsize):
     return model
 
 
-def load_quant(model, checkpoint, wbits, groupsize=-1, faster_kernel=False):
+def load_quant(model, checkpoint, wbits, groupsize=-1):
     from transformers import GPTJConfig, GPTJForCausalLM
 
     config = GPTJConfig.from_pretrained(model)
@@ -288,7 +288,7 @@ def load_quant(model, checkpoint, wbits, groupsize=-1, faster_kernel=False):
     for name in ["lm_head"]:
         if name in layers:
             del layers[name]
-    make_quant(model, layers, wbits, groupsize, faster=faster_kernel)
+    make_quant(model, layers, wbits, groupsize)
 
     del layers
 
@@ -483,11 +483,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--new-eval", action="store_true", help="Whether to use the new PTB and C4 eval"
     )
-    parser.add_argument(
-        "--faster-kernel",
-        action="store_true",
-        help="Whether to use the new faster kernel for benchmarking.",
-    )
     args = parser.parse_args()
 
     if type(args.load) is not str:
@@ -495,7 +490,7 @@ if __name__ == "__main__":
 
     if args.load:
         model = load_quant(
-            args.model, args.load, args.wbits, args.groupsize, args.faster_kernel
+            args.model, args.load, args.wbits, args.groupsize
         )
     else:
         model = get_gptj(args.model)
