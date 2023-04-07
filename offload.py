@@ -13,14 +13,10 @@ def offload_loop_start(self, idx, hidden_states, attention_mask, position_ids):
     device = next(decoder_layer.parameters()).device
 
     if device != hidden_states.device:
-        if device == torch.device("cpu"):
-            dtype = torch.float32
-        else:
-            dtype = torch.float16
         # Move auxiliary values
-        hidden_states = hidden_states.to(device, dtype, True)
-        attention_mask = attention_mask.to(device, dtype, True)
-        position_ids = position_ids.to(device, dtype, True)
+        hidden_states = hidden_states.to(device, torch.float16, True)
+        attention_mask = attention_mask.to(device, torch.float16, True)
+        position_ids = position_ids.to(device, torch.float16, True)
 
     return decoder_layer, hidden_states, attention_mask, position_ids
 
@@ -50,7 +46,7 @@ def offload_cleanup(self):
         next_cpu_layer = self.layer_count - idx - 1
         device = next(self.layers[next_cpu_layer].parameters()).device
         self.layers[next_cpu_layer].to(
-            self.cpu_device, torch.float16, True
+            self.cpu_device, torch.float16, False
         )
         self.layers[idx].to(device, torch.float16, True)
 
@@ -914,7 +910,7 @@ def load_quant_offload(
         m.layers = layers
 
     for i in range(layers_done, len(layers)):
-        layers[i].to(m.cpu_device, torch.float32, False)
+        layers[i].to(m.cpu_device, torch.float16, False)
 
     for module in remaining:
         module.to(gpu_order[0][0])
