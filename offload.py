@@ -104,6 +104,10 @@ def llama_offload_forward(
         return_dict (`bool`, *optional*):
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
     """
+    # If fast_offload not found, model is not initialized for offloading
+    if not "fast_offload" in dir(self):
+        return self.non_offload_forward(input_ids, attention_mask, position_ids, past_key_values, inputs_embeds, use_cache, output_attentions, output_hidden_states, return_dict)
+
     output_attentions = (
         output_attentions
         if output_attentions is not None
@@ -276,6 +280,10 @@ def gptneox_offload_forward(
         If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
         `past_key_values`).
     """
+    # If fast_offload not found, model is not initialized for offloading
+    if not "fast_offload" in dir(self):
+        return self.non_offload_forward(input_ids, attention_mask, position_ids, head_mask, inputs_embeds, past_key_values, use_cache, output_attentions, output_hidden_states, return_dict)
+
     output_attentions = (
         output_attentions
         if output_attentions is not None
@@ -440,6 +448,10 @@ def gptj_offload_forward(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
 ) -> Union[Tuple, BaseModelOutputWithPast]:
+    # If fast_offload not found, model is not initialized for offloading
+    if not "fast_offload" in dir(self):
+        return self.non_offload_forward(input_ids, past_key_values, attention_mask, token_type_ids, position_ids, head_mask, inputs_embeds, use_cache, output_attentions, output_hidden_states, return_dict)
+
     output_attentions = (
         output_attentions
         if output_attentions is not None
@@ -689,6 +701,10 @@ def opt_offload_forward(
         return_dict (`bool`, *optional*):
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
     """
+    # If fast_offload not found, model is not initialized for offloading
+    if "fast_offload" not in dir(self):
+        return self.non_offload_forward(input_ids, attention_mask, head_mask, past_key_values, inputs_embeds, use_cache, output_attentions, output_hidden_states, return_dict)
+
     output_attentions = (
         output_attentions
         if output_attentions is not None
@@ -882,6 +898,8 @@ def load_quant_offload(
             gpu_order.append((torch.device(f"cuda:{gpu}"), pre_layer))
 
     m, layers, remaining = find_layers(model)
+
+    type(m).non_offload_forward = type(m).forward
 
     # Hook offload_forward into found model
     if type(m) == LlamaModel:
