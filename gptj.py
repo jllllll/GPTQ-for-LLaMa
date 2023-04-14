@@ -81,7 +81,7 @@ def gptj_sequential(model, dataloader, dev):
         if args.true_sequential:
             sequential = [
                 ["attn.k_proj", "attn.v_proj", "attn.q_proj"],
-                ["attention.out_proj"],
+                ["attn.out_proj"],
                 ["mlp.fc_in"],
                 ["mlp.fc_out"],
             ]
