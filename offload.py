@@ -7,6 +7,8 @@ from transformers.models.gptj.modeling_gptj import GPTJModel
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from typing import List, Optional, Tuple, Union
 
+from dequant import dequant_layer
+
 
 def offload_loop_start(self, idx, hidden_states, attention_mask, position_ids):
     decoder_layer = self.layers[idx]
@@ -14,14 +16,18 @@ def offload_loop_start(self, idx, hidden_states, attention_mask, position_ids):
 
     if device != hidden_states.device:
         # Move auxiliary values
-        hidden_states = hidden_states.to(device, torch.float16, True)
-        attention_mask = attention_mask.to(device, torch.float16, True)
-        position_ids = position_ids.to(device, torch.float16, True)
+        dtype = torch.float32 if device == self.cpu_device else torch.float16
+        hidden_states = hidden_states.to(device, dtype, True)
+        attention_mask = attention_mask.to(device, dtype, True)
+        position_ids = position_ids.to(device, torch.int64, True)
 
     return decoder_layer, hidden_states, attention_mask, position_ids
 
 
 def offload_loop_end(self, idx):
+    if self.offload_type != 0:
+        return
+
     gpu = next(self.layers[idx].parameters()).device
     # Move one layer off the GPU(s), and one onto a GPU
     if not self.fast_offload:
@@ -38,9 +44,10 @@ def offload_loop_end(self, idx):
         )
 
 
-def offload_cleanup(self):
-    if not self.fast_offload:
-        return
+def offload_cleanup(self, hidden_states):
+    hidden_states = hidden_states.to(self.primary_gpu, torch.float16, False)
+    if self.offload_type != 0 or not self.fast_offload:
+        return hidden_states
 
     for idx in range(0, self.cpu_layers):
         next_cpu_layer = self.layer_count - idx - 1
@@ -49,6 +56,8 @@ def offload_cleanup(self):
             self.cpu_device, torch.float16, False
         )
         self.layers[idx].to(device, torch.float16, True)
+
+    return hidden_states
 
 
 def llama_offload_forward(
@@ -234,7 +243,7 @@ def llama_offload_forward(
         if output_attentions:
             all_self_attns += (layer_outputs[1],)
 
-    offload_cleanup(self)
+    hidden_states = offload_cleanup(self, hidden_states)
 
     hidden_states = self.norm(hidden_states)
 
@@ -250,7 +259,7 @@ def llama_offload_forward(
             if v is not None
         )
     return BaseModelOutputWithPast(
-        last_hidden_state=hidden_states,
+        last_hidden_state=hidden_states.to(self.primary_gpu),
         past_key_values=next_cache,
         hidden_states=all_hidden_states,
         attentions=all_self_attns,
@@ -412,7 +421,7 @@ def gptneox_offload_forward(
         if output_attentions:
             all_attentions = all_attentions + (outputs[2 if use_cache else 1],)
 
-    offload_cleanup(self)
+    hidden_states = offload_cleanup(self, hidden_states)
 
     hidden_states = self.final_layer_norm(hidden_states)
     # Add last hidden state
@@ -427,7 +436,7 @@ def gptneox_offload_forward(
         )
 
     return BaseModelOutputWithPast(
-        last_hidden_state=hidden_states,
+        last_hidden_state=hidden_states.to(self.primary_gpu),
         past_key_values=presents,
         hidden_states=all_hidden_states,
         attentions=all_attentions,
@@ -618,7 +627,7 @@ def gptj_offload_forward(
                 if i == v[-1] and "cuda:" + str(k) != self.last_device:
                     hidden_states = hidden_states.to("cuda:" + str(k + 1))
 
-    offload_cleanup(self)
+    hidden_states = offload_cleanup(self, hidden_states)
 
     hidden_states = self.ln_f(hidden_states)
 
@@ -635,7 +644,7 @@ def gptj_offload_forward(
         )
 
     return BaseModelOutputWithPast(
-        last_hidden_state=hidden_states,
+        last_hidden_state=hidden_states.to(self.primary_gpu),
         past_key_values=presents,
         hidden_states=all_hidden_states,
         attentions=all_self_attentions,
@@ -835,7 +844,7 @@ def opt_offload_forward(
         if output_attentions:
             all_self_attns += (layer_outputs[1],)
 
-    offload_cleanup(self)
+    hidden_states = offload_cleanup(self, hidden_states)
 
     if self.final_layer_norm is not None:
         hidden_states = self.final_layer_norm(hidden_states)
@@ -855,7 +864,7 @@ def opt_offload_forward(
             if v is not None
         )
     return BaseModelOutputWithPast(
-        last_hidden_state=hidden_states,
+        last_hidden_state=hidden_states.to(self.primary_gpu),
         past_key_values=next_cache,
         hidden_states=all_hidden_states,
         attentions=all_self_attns,
@@ -885,11 +894,9 @@ def find_layers(module):
 
 
 def load_quant_offload(
-    load_quant_func, model, checkpoint, wbits, groupsize, gpu_layers
+    load_quant_func, model, checkpoint, wbits, groupsize, gpu_layers, offload_type=0
 ):
     model = load_quant_func(model, checkpoint, wbits, groupsize)
-
-    layers_done = 0
 
     gpu_order = []
 
@@ -899,6 +906,7 @@ def load_quant_offload(
 
     m, layers, remaining = find_layers(model)
 
+    layers_done = 0
     type(m).non_offload_forward = type(m).forward
 
     # Hook offload_forward into found model
@@ -923,12 +931,21 @@ def load_quant_offload(
     m.layer_count = len(layers)
     m.cpu_layers = len(layers) - layers_done
     m.gpu_layers = layers_done
+    m.offload_type = offload_type
+    m.primary_gpu = gpu_order[0][0]
 
     if "layers" not in dir(m):
         m.layers = layers
 
-    for i in range(layers_done, len(layers)):
-        layers[i].to(m.cpu_device, torch.float16, False)
+    if offload_type == 0:
+        for i in range(layers_done, len(layers)):
+            layers[i].to(m.cpu_device, torch.float16, False)
+    elif offload_type == 1:
+        for layer in layers[sum(gpu_layers):]:
+            dequant_layer(layer.cpu(), wbits)
+            layer.to(m.cpu_device, torch.float32, False)
+    else:
+        raise NotImplementedError("Unsupported offload type")
 
     for module in remaining:
         module.to(gpu_order[0][0])
