@@ -3,8 +3,10 @@ import time
 import torch
 import torch.nn as nn
 
-from .modelutils import *
-from .quant import *
+import transformers
+
+from .modelutils import find_layers, make_quant
+from .quant import quantize, Quantizer, QuantLinear
 
 
 def get_llama(model):

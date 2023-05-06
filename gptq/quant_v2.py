@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import math
 
-import quant_cuda
+import quant_cuda_v2 as quant_cuda
 
 def quantize(x, scale, zero, maxq):
     if maxq < 0:
