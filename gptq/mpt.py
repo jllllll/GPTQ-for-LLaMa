@@ -3,9 +3,11 @@ import time
 import torch
 import torch.nn as nn
 
+import transformers
+
 from .gptq import *
 from .modelutils import *
-from .quant import *
+from .quant_v2 import *
 
 from hf_bleeding_edge.mpt import MPTConfig, MPTForCausalLM
 

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import transformers
 
-from quant import *
+from .quant_v2 import *
 
 
 DEBUG = False 
