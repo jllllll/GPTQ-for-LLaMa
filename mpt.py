@@ -106,7 +106,7 @@ def mpt_sequential(model, dataloader, dev):
                 print(i, name)
                 print('Quantizing ...')
                 scale,zero = gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order)
-                quantizers['transformer.block.%d.%s' % (i, name)] = (gptq[name].quantizer,scale,zero)
+                quantizers['transformer.blocks.%d.%s' % (i, name)] = (gptq[name].quantizer,scale,zero)
                 gptq[name].free()
                 
         for j in range(args.nsamples):
