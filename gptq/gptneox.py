@@ -4,12 +4,11 @@ import time
 import torch
 import torch.nn as nn
 
-from gptq import *
-from modelutils import *
-from quant import *
+from .modelutils import *
+from .quant import *
 
 
-def get_gptj(model):
+def get_gptneox(model):
     import torch
 
     def skip(*args, **kwargs):
@@ -18,23 +17,23 @@ def get_gptj(model):
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
-    from transformers import GPTJForCausalLM
+    from transformers import GPTNeoXForCausalLM
 
-    model = GPTJForCausalLM.from_pretrained(model, torch_dtype="auto")
+    model = GPTNeoXForCausalLM.from_pretrained(model, torch_dtype="auto")
     model.seqlen = 2048
     return model
 
 
 @torch.no_grad()
-def gptj_sequential(model, dataloader, dev):
+def gptneox_sequential(model, dataloader, dev):
     print("Starting ...")
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    layers = model.transformer.h
+    layers = model.gpt_neox.layers
 
-    model.transformer.wte = model.transformer.wte.to(dev)
-    model.transformer.ln_f = model.transformer.ln_f.to(dev)
+    model.gpt_neox.embed_in = model.gpt_neox.embed_in.to(dev)
+    model.gpt_neox.final_layer_norm = model.gpt_neox.final_layer_norm.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -48,8 +47,8 @@ def gptj_sequential(model, dataloader, dev):
             super().__init__()
             self.module = module
 
-        def forward(self, hidden_states, **kwargs):
-            inps[cache["i"]] = hidden_states
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
@@ -64,8 +63,8 @@ def gptj_sequential(model, dataloader, dev):
     layers[0] = layers[0].module
 
     layers[0] = layers[0].cpu()
-    model.transformer.wte = model.transformer.wte.cpu()
-    model.transformer.ln_f = model.transformer.ln_f.cpu()
+    model.gpt_neox.embed_in = model.gpt_neox.embed_in.cpu()
+    model.gpt_neox.final_layer_norm = model.gpt_neox.final_layer_norm.cpu()
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
@@ -80,10 +79,10 @@ def gptj_sequential(model, dataloader, dev):
         full = find_layers(layer)
         if args.true_sequential:
             sequential = [
-                ["attn.k_proj", "attn.v_proj", "attn.q_proj"],
-                ["attn.out_proj"],
-                ["mlp.fc_in"],
-                ["mlp.fc_out"],
+                ["attention.query_key_value"],
+                ["attention.dense"],
+                ["mlp.dense_h_to_4h"],
+                ["mlp.dense_4h_to_h"],
             ]
         else:
             sequential = [list(full.keys())]
@@ -124,7 +123,7 @@ def gptj_sequential(model, dataloader, dev):
                     groupsize=args.groupsize,
                     actorder=args.act_order,
                 )
-                quantizers["transformer.h.%d.%s" % (i, name)] = (
+                quantizers["gpt_neox.layers.%d.%s" % (i, name)] = (
                     gptq[name].quantizer,
                     scale,
                     zero,
@@ -151,7 +150,7 @@ def gptj_sequential(model, dataloader, dev):
 
 
 @torch.no_grad()
-def gptj_eval(model, testenc, dev):
+def gptneox_eval(model, testenc, dev):
     print("Evaluating ...")
 
     testenc = testenc.input_ids
@@ -159,9 +158,9 @@ def gptj_eval(model, testenc, dev):
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    layers = model.transformer.h
+    layers = model.gpt_neox.layers
 
-    model.transformer.wte = model.transformer.wte.to(dev)
+    model.gpt_neox.embed_in = model.gpt_neox.embed_in.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -192,7 +191,7 @@ def gptj_eval(model, testenc, dev):
     layers[0] = layers[0].module
 
     layers[0] = layers[0].cpu()
-    model.transformer.wte = model.transformer.wte.cpu()
+    model.gpt_neox.embed_in = model.gpt_neox.embed_in.cpu()
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
@@ -225,17 +224,17 @@ def gptj_eval(model, testenc, dev):
         torch.cuda.empty_cache()
         inps, outs = outs, inps
 
-    if model.transformer.ln_f is not None:
-        model.transformer.ln_f = model.transformer.ln_f.to(dev)
-    model.lm_head = model.lm_head.to(dev)
+    if model.gpt_neox.final_layer_norm is not None:
+        model.gpt_neox.final_layer_norm = model.gpt_neox.final_layer_norm.to(dev)
+    model.embed_out = model.embed_out.to(dev)
 
     testenc = testenc.to(dev)
     nlls = []
     for i in range(nsamples):
         hidden_states = inps[i].unsqueeze(0)
-        if model.transformer.ln_f is not None:
-            hidden_states = model.transformer.ln_f(hidden_states)
-        lm_logits = model.lm_head(hidden_states)
+        if model.gpt_neox.final_layer_norm is not None:
+            hidden_states = model.gpt_neox.final_layer_norm(hidden_states)
+        lm_logits = model.embed_out(hidden_states)
         shift_logits = lm_logits[:, :-1, :].contiguous()
         shift_labels = testenc[:, (i * model.seqlen) : ((i + 1) * model.seqlen)][:, 1:]
         loss_fct = nn.CrossEntropyLoss()
@@ -251,7 +250,7 @@ def gptj_eval(model, testenc, dev):
 
 
 # TODO: perform packing on GPU
-def gptj_pack(model, quantizers, wbits, groupsize):
+def gptneox_pack(model, quantizers, wbits, groupsize):
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
     make_quant(model, quantizers, wbits, groupsize)
@@ -267,25 +266,25 @@ def gptj_pack(model, quantizers, wbits, groupsize):
 
 
 def load_quant(model, checkpoint, wbits, groupsize=-1):
-    from transformers import GPTJConfig, GPTJForCausalLM
+    from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
 
-    config = GPTJConfig.from_pretrained(model)
+    config = GPTNeoXConfig.from_pretrained(model)
 
     def noop(*args, **kwargs):
         pass
 
     torch.nn.init.kaiming_uniform_ = noop
     torch.nn.init.uniform_ = noop
-    torch.nn.init.ln_fal_ = noop
+    torch.nn.init.final_layer_normal_ = noop
 
     torch.set_default_dtype(torch.half)
     transformers.modeling_utils._init_weights = False
     torch.set_default_dtype(torch.half)
-    model = GPTJForCausalLM(config)
+    model = GPTNeoXForCausalLM(config)
     torch.set_default_dtype(torch.float)
     model = model.eval()
     layers = find_layers(model)
-    for name in ["lm_head"]:
+    for name in ["embed_out"]:
         if name in layers:
             del layers[name]
     make_quant(model, layers, wbits, groupsize)
@@ -305,13 +304,13 @@ def load_quant(model, checkpoint, wbits, groupsize=-1):
     return model
 
 
-def gptj_multigpu(model, gpus):
-    model.transformer.wte = model.transformer.wte.to(gpus[0])
-    if hasattr(model.transformer, "ln_f") and model.transformer.ln_f:
-        model.transformer.ln_f = model.transformer.ln_f.to(gpus[-1])
+def gptneox_multigpu(model, gpus):
+    model.gpt_neox.embed_in = model.gpt_neox.embed_in.to(gpus[0])
+    if hasattr(model.gpt_neox, "final_layer_norm") and model.gpt_neox.final_layer_norm:
+        model.gpt_neox.final_layer_norm = model.gpt_neox.final_layer_norm.to(gpus[-1])
     import copy
 
-    model.lm_head = copy.deepcopy(model.lm_head).to(gpus[-1])
+    model.embed_out = copy.deepcopy(model.embed_out).to(gpus[-1])
 
     cache = {"mask": None}
 
@@ -331,7 +330,7 @@ def gptj_multigpu(model, gpus):
             tmp = self.module(*inp, **kwargs)
             return tmp
 
-    layers = model.transformer.h
+    layers = model.gpt_neox.layers
     pergpu = math.ceil(len(layers) / len(gpus))
     for i in range(len(layers)):
         layers[i] = MoveModule(layers[i].to(gpus[i // pergpu]))
@@ -352,7 +351,7 @@ def benchmark(model, input_ids, check=False):
 
         return tmp
 
-    for i, layer in enumerate(model.transformer.h):
+    for i, layer in enumerate(model.gpt_neox.layers):
         layer.register_forward_hook(clear_past(i))
 
     print("Benchmarking ...")
@@ -404,7 +403,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("model", type=str, help="gptj model to load")
+    parser.add_argument("model", type=str, help="gptneox model to load")
     parser.add_argument(
         "dataset",
         type=str,
@@ -493,7 +492,7 @@ if __name__ == "__main__":
             args.model, args.load, args.wbits, args.groupsize
         )
     else:
-        model = get_gptj(args.model)
+        model = get_gptneox(args.model)
         model.eval()
 
     dataloader, testloader = get_loaders(
@@ -507,7 +506,7 @@ if __name__ == "__main__":
 
     if not args.load and args.wbits < 16 and not args.nearest:
         tick = time.time()
-        quantizers = gptj_sequential(model, dataloader, DEV)
+        quantizers = gptneox_sequential(model, dataloader, DEV)
         print(time.time() - tick)
 
     if args.eval:
@@ -516,21 +515,17 @@ if __name__ == "__main__":
             datasets = ["wikitext2", "ptb-new", "c4-new"]
         for dataset in datasets:
             dataloader, testloader = get_loaders(
-                dataset,
-                seed=args.seed,
-                model=args.model,
-                seqlen=model.seqlen,
-                use_fast=True,
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
             )
             print(dataset)
-            gptj_eval(model, testloader, DEV)
+            gptneox_eval(model, testloader, DEV)
 
     if args.save:
-        gptj_pack(model, quantizers, args.wbits, args.groupsize)
+        gptneox_pack(model, quantizers, args.wbits, args.groupsize)
         torch.save(model.state_dict(), args.save)
 
     if args.save_safetensors:
-        gptj_pack(model, quantizers, args.wbits, args.groupsize)
+        gptneox_pack(model, quantizers, args.wbits, args.groupsize)
         from safetensors.torch import save_file as safe_save
 
         safe_save(model.state_dict(), args.save_safetensors)
@@ -538,7 +533,7 @@ if __name__ == "__main__":
     if args.benchmark:
         gpus = [torch.device("cuda:%d" % i) for i in range(torch.cuda.device_count())]
         if len(gpus) > 1:
-            gptj_multigpu(model, gpus)
+            gptneox_multigpu(model, gpus)
         else:
             model = model.to(DEV)
         if args.benchmark:

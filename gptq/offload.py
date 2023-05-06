@@ -7,7 +7,7 @@ from transformers.models.gptj.modeling_gptj import GPTJModel
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from typing import List, Optional, Tuple, Union
 
-from dequant import dequant_layer
+from .dequant import dequant_layer
 
 
 def offload_loop_start(self, idx, hidden_states, attention_mask, position_ids):

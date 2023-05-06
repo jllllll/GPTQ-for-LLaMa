@@ -1,6 +1,6 @@
 import torch
 
-from quant import QuantLinear
+from .quant import QuantLinear
 
 
 def dequantize(qlinear, bits):

@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+GPTQVERSION = 1
+
 
 DEV = torch.device('cuda:0')
 
@@ -14,3 +16,13 @@ def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
             child, layers=layers, name=name + '.' + name1 if name != '' else name1
         ))
     return res
+
+
+def make_quant(*args, **kwargs):
+    if GPTQVERSION == 0:
+        from quant_cuda_v1 import quant
+        return quant.make_quant(*args, **kwargs)
+
+    if GPTQVERSION == 1:
+        from quant_cuda_v2 import quant
+        return quant.make_quant(*args, **kwargs)
