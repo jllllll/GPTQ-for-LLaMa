@@ -7,7 +7,7 @@ import torch.nn as nn
 import transformers
 
 from .modelutils import find_layers, make_quant
-from .quant import quantize, Quantizer, QuantLinear
+from .quant_v2 import quantize, Quantizer, QuantLinear
 
 
 def get_gptj(model):
