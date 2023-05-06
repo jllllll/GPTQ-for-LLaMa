@@ -2,7 +2,7 @@ from setuptools import setup, Extension
 from torch.utils import cpp_extension
 
 setup(
-    name="gptq",
+    name="gptq-koboldai",
     version="0.0.1",
     install_requires=[
         "hf_bleeding_edge",
