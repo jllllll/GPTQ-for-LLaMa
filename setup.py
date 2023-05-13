@@ -3,7 +3,7 @@ from torch.utils import cpp_extension
 
 setup(
     name="gptq-koboldai",
-    version="0.0.2",
+    version="0.0.3",
     install_requires=[
         "hf_bleeding_edge",
         "torch",
