@@ -1,4 +1,4 @@
-name: Build Wheels For Release
+name: Build Wheels
 
 permissions:
   contents: write
