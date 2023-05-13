@@ -257,6 +257,7 @@ def opt_pack(model, quantizers, wbits, groupsize):
 
 def load_quant(model, checkpoint, wbits, groupsize):
     from transformers import OPTConfig, OPTForCausalLM 
+    import transformers
     config = OPTConfig.from_pretrained(model)
     def noop(*args, **kwargs):
         pass
