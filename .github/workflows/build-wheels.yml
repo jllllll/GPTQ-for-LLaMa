@@ -19,18 +19,21 @@ jobs:
         with:
           python-version: '3.8'
         
-      - name: Setup Miniconda
+      - name: Setup Mamba
         uses: conda-incubator/setup-miniconda@v2.2.0
         with:
-          auto-update-conda: true
           activate-environment: "build"
           python-version: 3.8
+          mamba-version: "*"
+          use-mamba: true
+          channels: conda-forge,defaults
+          channel-priority: true
           add-pip-as-python-dependency: true
           auto-activate-base: false
           
       - name: Install Dependencies
         run: |
-          conda install 'pytorch[version=2.0.0,build=py*_cuda11.8*]' 'pytorch-cuda=11.8' 'sentencepiece' 'cuda' 'ninja' -c 'pytorch' -c 'nvidia/label/cuda-11.8.0' -c 'nvidia' -c 'conda-forge' -c 'defaults'
+          mamba install 'pytorch[version=2.0.0,build=py*_cuda11.8*]' 'pytorch-cuda=11.8' 'sentencepiece' 'cuda' 'ninja' -c 'pytorch' -c 'nvidia/label/cuda-11.8.0' -c 'nvidia' -c 'conda-forge' -c 'defaults'
           python -m pip install build transformers==4.28.0 datasets safetensors accelerate==0.18.0
 
       - name: Build Wheel
