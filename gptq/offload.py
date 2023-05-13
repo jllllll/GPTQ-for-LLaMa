@@ -11,52 +11,56 @@ from typing import List, Optional, Tuple, Union
 from .dequant import dequant_layer
 
 
-def offload_loop_start(self, idx, hidden_states, attention_mask, position_ids):
-    decoder_layer = self.layers[idx]
+def offload_loop_start(self, layers, idx, hidden_states, attention_mask, position_ids, past_key_value):
+    decoder_layer = layers[idx]
     device = next(decoder_layer.parameters()).device
 
     if device != hidden_states.device:
         # Move auxiliary values
         dtype = torch.float32 if device == self.cpu_device else torch.float16
         hidden_states = hidden_states.to(device, dtype, True)
-        attention_mask = attention_mask.to(device, dtype, True)
-        position_ids = position_ids.to(device, torch.int64, True)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device, dtype, True)
+        if position_ids is not None:
+            position_ids = position_ids.to(device, torch.int64, True)
+        if past_key_value is not None and past_key_value is not ():
+            past_key_value = (past_key_value[0].to(device, dtype, True), past_key_value[1].to(device, dtype, True))
 
-    return decoder_layer, hidden_states, attention_mask, position_ids
+    return decoder_layer, hidden_states, attention_mask, position_ids, past_key_value
 
 
-def offload_loop_end(self, idx):
+def offload_loop_end(self, layers, idx):
     if self.offload_type != 0:
         return
 
-    gpu = next(self.layers[idx].parameters()).device
+    gpu = next(layers[idx].parameters()).device
     # Move one layer off the GPU(s), and one onto a GPU
     if not self.fast_offload:
-        self.layers[idx].to(self.cpu_device, torch.float16, True)
+        layers[idx].to(self.cpu_device, torch.float16, True)
         next_cpu_layer = (idx + self.gpu_layers) % self.layer_count
-        self.layers[next_cpu_layer].to(
+        layers[next_cpu_layer].to(
             gpu, torch.float16, True
         )
     elif idx < self.cpu_layers:
-        self.layers[idx].to(self.cpu_device, torch.float16, True)
+        layers[idx].to(self.cpu_device, torch.float16, True)
         next_cpu_layer = self.layer_count - idx - 1
-        self.layers[next_cpu_layer].to(
+        layers[next_cpu_layer].to(
             gpu, torch.float16, True
         )
 
 
-def offload_cleanup(self, hidden_states):
+def offload_cleanup(self, layers, hidden_states):
     hidden_states = hidden_states.to(self.primary_gpu, torch.float16, False)
     if self.offload_type != 0 or not self.fast_offload:
         return hidden_states
 
     for idx in range(0, self.cpu_layers):
         next_cpu_layer = self.layer_count - idx - 1
-        device = next(self.layers[next_cpu_layer].parameters()).device
-        self.layers[next_cpu_layer].to(
+        device = next(layers[next_cpu_layer].parameters()).device
+        layers[next_cpu_layer].to(
             self.cpu_device, torch.float16, False
         )
-        self.layers[idx].to(device, torch.float16, True)
+        layers[idx].to(device, torch.float16, True)
 
     return hidden_states
 
@@ -194,17 +198,17 @@ def llama_offload_forward(
     next_decoder_cache = () if use_cache else None
 
     for idx in range(len(self.layers)):
+        past_key_value = past_key_values[idx] if past_key_values is not None else None
         (
             decoder_layer,
             hidden_states,
             attention_mask,
             position_ids,
-        ) = offload_loop_start(self, idx, hidden_states, attention_mask, position_ids)
+            past_key_value,
+        ) = offload_loop_start(self, self.layers, idx, hidden_states, attention_mask, position_ids, past_key_value)
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
-
-        past_key_value = past_key_values[idx] if past_key_values is not None else None
 
         if self.gradient_checkpointing and self.training:
 
@@ -235,16 +239,17 @@ def llama_offload_forward(
         hidden_states = layer_outputs[0]
 
         offload_loop_end(
-            self, idx
+            self, self.layers, idx
         )
 
         if use_cache:
-            next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+            cache = layer_outputs[2 if output_attentions else 1]
+            next_decoder_cache += ((cache[0].to(self.primary_gpu, torch.float16, True), cache[1].to(self.primary_gpu, torch.float16, True)),)
 
         if output_attentions:
             all_self_attns += (layer_outputs[1],)
 
-    hidden_states = offload_cleanup(self, hidden_states)
+    hidden_states = offload_cleanup(self, self.layers, hidden_states)
 
     hidden_states = self.norm(hidden_states)
 
@@ -380,8 +385,8 @@ def gptneox_offload_forward(
     all_hidden_states = () if output_hidden_states else None
 
     for i, (layer, layer_past) in enumerate(zip(self.layers, past_key_values)):
-        layer, hidden_states, attention_mask, position_ids = offload_loop_start(
-            self, i, hidden_states, attention_mask, position_ids
+        layer, hidden_states, attention_mask, position_ids, layer_past = offload_loop_start(
+            self, self.layers, i, hidden_states, attention_mask, position_ids, layer_past
         )
 
         if output_hidden_states:
@@ -415,14 +420,15 @@ def gptneox_offload_forward(
             )
         hidden_states = outputs[0]
         offload_loop_end(
-            self, i
+            self, self.layers, i
         )
         if use_cache is True:
-            presents = presents + (outputs[1],)
+            cache = outputs[1]
+            presents = presents + ((cache[0].to(self.primary_gpu, torch.float16, True), cache[1].to(self.primary_gpu, torch.float16, True)),)
         if output_attentions:
             all_attentions = all_attentions + (outputs[2 if use_cache else 1],)
 
-    hidden_states = offload_cleanup(self, hidden_states)
+    hidden_states = offload_cleanup(self, self.layers, hidden_states)
 
     hidden_states = self.final_layer_norm(hidden_states)
     # Add last hidden state
@@ -562,8 +568,8 @@ def gptj_offload_forward(
     all_hidden_states = () if output_hidden_states else None
 
     for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
-        block, hidden_states, attention_mask, position_ids = offload_loop_start(
-            self, i, hidden_states, attention_mask, position_ids
+        block, hidden_states, attention_mask, position_ids, layer_past = offload_loop_start(
+            self, self.h, i, hidden_states, attention_mask, position_ids, layer_past
         )
         # Model parallel
         if self.model_parallel:
@@ -611,10 +617,11 @@ def gptj_offload_forward(
 
         hidden_states = outputs[0]
         if use_cache is True:
-            presents = presents + (outputs[1],)
+            cache = outputs[1]
+            presents = presents + ((cache[0].to(self.primary_gpu, torch.float16, True), cache[1].to(self.primary_gpu, torch.float16, True)),)
 
         offload_loop_end(
-            self, i
+            self, self.h, i
         )
 
         if output_attentions:
@@ -628,7 +635,7 @@ def gptj_offload_forward(
                 if i == v[-1] and "cuda:" + str(k) != self.last_device:
                     hidden_states = hidden_states.to("cuda:" + str(k + 1))
 
-    hidden_states = offload_cleanup(self, hidden_states)
+    hidden_states = offload_cleanup(self, self.h, hidden_states)
 
     hidden_states = self.ln_f(hidden_states)
 
@@ -791,12 +798,14 @@ def opt_offload_forward(
                 )
 
     for idx, decoder_layer in enumerate(self.layers):
+        past_key_value = past_key_values[idx] if past_key_values is not None else None
         (
             decoder_layer,
             hidden_states,
             attention_mask,
             position_ids,
-        ) = offload_loop_start(self, idx, hidden_states, attention_mask, position_ids)
+            past_key_value,
+        ) = offload_loop_start(self, self.layers, idx, hidden_states, attention_mask, position_ids, past_key_value)
         # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
@@ -804,8 +813,6 @@ def opt_offload_forward(
         dropout_probability = random.uniform(0, 1)
         if self.training and (dropout_probability < self.layerdrop):
             continue
-
-        past_key_value = past_key_values[idx] if past_key_values is not None else None
 
         if self.gradient_checkpointing and self.training:
 
@@ -836,16 +843,17 @@ def opt_offload_forward(
         hidden_states = layer_outputs[0]
 
         offload_loop_end(
-            self, idx
+            self, self.layers, idx
         )
 
         if use_cache:
-            next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+            cache = layer_outputs[2 if output_attentions else 1]
+            next_decoder_cache += ((cache[0].to(self.primary_gpu, torch.float16, True), cache[1].to(self.primary_gpu, torch.float16, True)),)
 
         if output_attentions:
             all_self_attns += (layer_outputs[1],)
 
-    hidden_states = offload_cleanup(self, hidden_states)
+    hidden_states = offload_cleanup(self, self.layers, hidden_states)
 
     if self.final_layer_norm is not None:
         hidden_states = self.final_layer_norm(hidden_states)
@@ -920,25 +928,29 @@ def mpt_offload_forward(self, input_ids: torch.LongTensor, past_key_values: Opti
         past_key_values = [() for _ in range(self.config.n_layers)]
     all_hidden_states = () if output_hidden_states else None
     for (b_idx, block) in enumerate(self.blocks):
+        past_key_value = past_key_values[b_idx] if past_key_values is not None else None
         (
             block,
             x,
             attention_mask,
-            position_ids,
-        ) = offload_loop_start(self, b_idx, x, attention_mask, None)
+            _,
+            past_key_value,
+        ) = offload_loop_start(self, self.blocks, b_idx, x, attention_mask, None, past_key_value)
+        device = next(block.parameters()).device
+        if attn_bias.device != device:
+            attn_bias = attn_bias.to(device, torch.float16, True)
 
         if output_hidden_states:
             assert all_hidden_states is not None
             all_hidden_states = all_hidden_states + (x,)
-        past_key_value = past_key_values[b_idx] if past_key_values is not None else None
         (x, past_key_value) = block(x, past_key_value=past_key_value, attn_bias=attn_bias, attention_mask=attention_mask, is_causal=self.is_causal)
         if past_key_values is not None:
-            past_key_values[b_idx] = past_key_value
+            past_key_values[b_idx] = (past_key_value[0].to(self.primary_gpu, torch.float16, True), past_key_value[1].to(self.primary_gpu, torch.float16, True))
 
         offload_loop_end(
-            self, b_idx
+            self, self.blocks, b_idx
         )
-    hidden_states = offload_cleanup(self, x)
+    x = offload_cleanup(self, self.blocks, x)
     x = self.norm_f(x)
     return BaseModelOutputWithPast(last_hidden_state=x, past_key_values=past_key_values, hidden_states=all_hidden_states)
 
