@@ -5,14 +5,12 @@ GPTQ is SOTA one-shot weight quantization method
 
 **This code is based on [GPTQ](https://github.com/IST-DASLab/gptq)**
 
-**There is a [pytorch branch](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/pytorch) that allows you to use `groupsize` and `act-order` together.**
+This version has been created and tested for use with KoboldAI
 
 ## New Features
-Changed to support new features proposed by [GPTQ](https://github.com/IST-DASLab/gptq#new-features).
-
-* Slightly adjusted preprocessing of C4 and PTB for more realistic evaluations (used in our updated results); can be activated via the flag --new-eval.
-* Optimized cuda kernels, which are considerably faster especially on the A100, e.g. 1.9x -> 3.25x generation speedup for OPT-175B; can be activated via --faster-kernel.
-* two new tricks:--act-order (quantizing columns in order of decreasing activation size) and --true-sequential (performing sequential quantization even within a single Transformer block). Those fix GPTQ's strangely bad performance on the 7B model (from 7.15 to 6.09 Wiki2 PPL) and lead to slight improvements on most models/settings in general. 
+* Optimized CPU Offloading
+* Optimized GPU Splitting
+* Backwards Compatibility with older GPTQ-models
 
 **Currently, `groupsize` and `act-order` do not work together and you must choose one of them.**
 
@@ -79,22 +77,26 @@ Depending on the GPUs/drivers, there may be a difference in performance, which d
 According to [GPTQ paper](https://arxiv.org/abs/2210.17323), As the size of the model increases, the difference in performance between FP16 and GPTQ decreases.
 
 ## Installation
+```pip install git+https://github.com/0cc4m/GPTQ-for-LLaMa@c884b421a233f9603d8224c9b22c2d83dd2c1fc4```
+
+old instructions:
+
 If you don't have [conda](https://docs.conda.io/en/latest/miniconda.html), install it first.
-```
-conda create --name gptq python=3.9 -y
-conda activate gptq
-conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvidia
-# Or, if you're having trouble with conda, use pip with python3.9:
-# pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
 
-git clone https://github.com/qwopqwop200/GPTQ-for-LLaMa
-cd GPTQ-for-LLaMa
-pip install -r requirements.txt
-python setup_cuda.py install
+      conda create --name gptq python=3.9 -y
+      conda activate gptq
+      conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvidia
+      # Or, if you're having trouble with conda, use pip with python3.9:
+      # pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
 
-# Benchmark performance for FC2 layer of LLaMa-7B
-CUDA_VISIBLE_DEVICES=0 python test_kernel.py
-```
+      git clone https://github.com/0cc4m/GPTQ-for-LLaMa
+      cd GPTQ-for-LLaMa
+      pip install -r requirements.txt
+      python setup_cuda.py install
+
+      # Benchmark performance for FC2 layer of LLaMa-7B
+      CUDA_VISIBLE_DEVICES=0 python test_kernel.py
+      
 ## Dependencies
 
 * `torch`: tested on v2.0.0+cu117
@@ -107,26 +109,36 @@ All experiments were run on a single NVIDIA RTX3090.
 
 # Language Generation
 ## LLaMA
+The format for using this version of GPTQ has changed from specifying python files, to specifying the module name.
+| Old Command | New Way |
+| --- | --- |
+| python llama.py | python -m gptq.llama |
+| python gptj.py | python -m gptq.gptj |
+| python opt.py | python -m gptq.opt |
+| python gptneox.py | python -m gptq.gptneox |
+| python llama_inference.py | python -m gptq.llama_inference |
+| python llama_inference_offload.py | python -m gptq.llama_inference_offload |
+| python convert\_llama\_weights\_to\_hf.py | python -m gptq. convert\_llama\_weights\_to\_hf |
 
 ```
 #convert LLaMA to hf
-python convert_llama_weights_to_hf.py --input_dir /path/to/downloaded/llama/weights --model_size 7B --output_dir ./llama-hf
+python -m gptq.convert_llama_weights_to_hf --input_dir /path/to/downloaded/llama/weights --model_size 7B --output_dir ./llama-hf
 
 # Benchmark language generation with 4-bit LLaMA-7B:
 
 # Save compressed model
-CUDA_VISIBLE_DEVICES=0 python llama.py ./llama-hf/llama-7b c4 --wbits 4 --true-sequential --act-order --save llama7b-4bit.pt
+CUDA_VISIBLE_DEVICES=0 python -m gptq.llama ./llama-hf/llama-7b c4 --wbits 4 --true-sequential --act-order --save llama7b-4bit.pt
 # Or save compressed `.safetensors` model
-CUDA_VISIBLE_DEVICES=0 python llama.py ./llama-hf/llama-7b c4 --wbits 4 --true-sequential --act-order --save_safetensors llama7b-4bit.safetensors
+CUDA_VISIBLE_DEVICES=0 python -m gptq.llama ./llama-hf/llama-7b c4 --wbits 4 --true-sequential --act-order --save_safetensors llama7b-4bit.safetensors
 # Benchmark generating a 2048 token sequence with the saved model
-CUDA_VISIBLE_DEVICES=0 python llama.py ./llama-hf/llama-7b c4 --wbits 4 --load llama7b-4bit.pt --benchmark 2048 --check
+CUDA_VISIBLE_DEVICES=0 python -m gptq.llama ./llama-hf/llama-7b c4 --wbits 4 --load llama7b-4bit.pt --benchmark 2048 --check
 # Benchmark FP16 baseline, note that the model will be split across all listed GPUs
-CUDA_VISIBLE_DEVICES=0,1,2,3,4 python llama.py ./llama-hf/llama-7b c4 --benchmark 2048 --check
+CUDA_VISIBLE_DEVICES=0,1,2,3,4 python -m gptq.llama ./llama-hf/llama-7b c4 --benchmark 2048 --check
 
 # model inference with the saved model
-CUDA_VISIBLE_DEVICES=0 python llama_inference.py ./llama-hf/llama-7b --wbits 4 --load llama7b-4bit.pt --text "this is llama"
+CUDA_VISIBLE_DEVICES=0 python -m gptq.llama_inference ./llama-hf/llama-7b --wbits 4 --load llama7b-4bit.pt --text "this is llama"
 # model inference with the saved model with offload(This is very slow. This is a simple implementation and could be improved with technologies like flexgen(https://github.com/FMInference/FlexGen).
-CUDA_VISIBLE_DEVICES=0 python llama_inference_offload.py ./llama-hf/llama-7b --wbits 4 --load llama7b-4bit.pt --text "this is llama" --pre_layer 16
+CUDA_VISIBLE_DEVICES=0 python -m gptq.llama_inference_offload ./llama-hf/llama-7b --wbits 4 --load llama7b-4bit.pt --text "this is llama" --pre_layer 16
 It takes about 180 seconds to generate 45 tokens(5->50 tokens) on single RTX3090 based on LLaMa-65B. pre_layer is set to 50.
 ```
 CUDA Kernels support 2,3,4,8 bits and Faster CUDA Kernels support 2,3,4 bits.
