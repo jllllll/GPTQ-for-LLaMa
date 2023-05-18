@@ -13,7 +13,10 @@ if GPTQVERSION == 1:
 elif GPTQVERSION == 2:
     from .quant_v3 import quantize, Quantizer, QuantLinear
 
-from hf_bleeding_edge.mpt import MPTConfig, MPTForCausalLM
+try:
+    from hf_bleeding_edge.mpt import MPTConfig, MPTForCausalLM
+except ImportError:
+    pass
 
 
 def get_mpt(model):

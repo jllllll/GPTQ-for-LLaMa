@@ -5,9 +5,11 @@ setup(
     name="gptq-koboldai",
     version="0.0.3",
     install_requires=[
-        "hf_bleeding_edge",
         "torch",
     ],
+    extras_require = {
+        "mpt_support:  ["hf_bleeding_edge"],
+    },
     packages=["gptq"],
     py_modules=["gptq"],
     ext_modules=[

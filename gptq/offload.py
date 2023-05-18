@@ -4,7 +4,11 @@ from transformers.models.llama.modeling_llama import LlamaModel
 from transformers.models.opt.modeling_opt import OPTModel
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXModel
 from transformers.models.gptj.modeling_gptj import GPTJModel
-from hf_bleeding_edge.mpt.modeling_mpt import MPTModel
+mpt_support = True
+try:
+    from hf_bleeding_edge.mpt.modeling_mpt import MPTModel
+except ImportError:
+    mpt_support = False
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from typing import List, Optional, Tuple, Union
 
@@ -1002,7 +1006,7 @@ def load_quant_offload(
         type(m).forward = gptj_offload_forward
     elif type(m) == OPTModel:
         type(m).forward = opt_offload_forward
-    elif type(m) == MPTModel:
+    elif mpt_support and type(m) == MPTModel:
         type(m).forward = mpt_offload_forward
     else:
         raise RuntimeError(f"Model type {type(m)} not supported by CPU offloader")
