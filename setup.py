@@ -8,7 +8,7 @@ setup(
         "torch",
     ],
     extras_require = {
-        "mpt_support:  ["hf_bleeding_edge"],
+        "mpt_support": ["hf_bleeding_edge"]
     },
     packages=["gptq"],
     py_modules=["gptq"],
