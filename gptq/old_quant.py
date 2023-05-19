@@ -1,6 +1,6 @@
 import torch
 
-import quant_cuda_old
+import quant_cuda_v1 as quant_cuda_old
 
 
 # Assumes layer is perfectly divisible into 256 * 256 blocks

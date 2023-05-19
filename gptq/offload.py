@@ -4,7 +4,11 @@ from transformers.models.llama.modeling_llama import LlamaModel
 from transformers.models.opt.modeling_opt import OPTModel
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXModel
 from transformers.models.gptj.modeling_gptj import GPTJModel
-from hf_bleeding_edge.mpt.modeling_mpt import MPTModel
+mpt_support = True
+try:
+    from hf_bleeding_edge.mpt.modeling_mpt import MPTModel
+except ImportError:
+    mpt_support = False
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from typing import List, Optional, Tuple, Union
 
@@ -17,14 +21,15 @@ def offload_loop_start(self, layers, idx, hidden_states, attention_mask, positio
 
     if device != hidden_states.device:
         # Move auxiliary values
-        dtype = torch.float32 if device == self.cpu_device else torch.float16
+        dtype = torch.float32 if self.offload_type == 1 and device == self.cpu_device else torch.float16
         hidden_states = hidden_states.to(device, dtype, True)
         if attention_mask is not None:
             attention_mask = attention_mask.to(device, dtype, True)
         if position_ids is not None:
             position_ids = position_ids.to(device, torch.int64, True)
-        if past_key_value is not None and past_key_value is not ():
-            past_key_value = (past_key_value[0].to(device, dtype, True), past_key_value[1].to(device, dtype, True))
+    if past_key_value not in (None, ()) and device != past_key_value[0].device:
+        dtype = torch.float32 if self.offload_type == 1 and device == self.cpu_device else torch.float16
+        past_key_value = (past_key_value[0].to(device, dtype, True), past_key_value[1].to(device, dtype, True))
 
     return decoder_layer, hidden_states, attention_mask, position_ids, past_key_value
 
@@ -243,8 +248,7 @@ def llama_offload_forward(
         )
 
         if use_cache:
-            cache = layer_outputs[2 if output_attentions else 1]
-            next_decoder_cache += ((cache[0].to(self.primary_gpu, torch.float16, True), cache[1].to(self.primary_gpu, torch.float16, True)),)
+            next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
 
         if output_attentions:
             all_self_attns += (layer_outputs[1],)
@@ -423,8 +427,7 @@ def gptneox_offload_forward(
             self, self.layers, i
         )
         if use_cache is True:
-            cache = outputs[1]
-            presents = presents + ((cache[0].to(self.primary_gpu, torch.float16, True), cache[1].to(self.primary_gpu, torch.float16, True)),)
+            presents = presents + (outputs[1],)
         if output_attentions:
             all_attentions = all_attentions + (outputs[2 if use_cache else 1],)
 
@@ -617,8 +620,7 @@ def gptj_offload_forward(
 
         hidden_states = outputs[0]
         if use_cache is True:
-            cache = outputs[1]
-            presents = presents + ((cache[0].to(self.primary_gpu, torch.float16, True), cache[1].to(self.primary_gpu, torch.float16, True)),)
+            presents = presents + (outputs[1],)
 
         offload_loop_end(
             self, self.h, i
@@ -847,8 +849,7 @@ def opt_offload_forward(
         )
 
         if use_cache:
-            cache = layer_outputs[2 if output_attentions else 1]
-            next_decoder_cache += ((cache[0].to(self.primary_gpu, torch.float16, True), cache[1].to(self.primary_gpu, torch.float16, True)),)
+            next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
 
         if output_attentions:
             all_self_attns += (layer_outputs[1],)
@@ -945,7 +946,7 @@ def mpt_offload_forward(self, input_ids: torch.LongTensor, past_key_values: Opti
             all_hidden_states = all_hidden_states + (x,)
         (x, past_key_value) = block(x, past_key_value=past_key_value, attn_bias=attn_bias, attention_mask=attention_mask, is_causal=self.is_causal)
         if past_key_values is not None:
-            past_key_values[b_idx] = (past_key_value[0].to(self.primary_gpu, torch.float16, True), past_key_value[1].to(self.primary_gpu, torch.float16, True))
+            past_key_values[b_idx] = past_key_value
 
         offload_loop_end(
             self, self.blocks, b_idx
@@ -1002,7 +1003,7 @@ def load_quant_offload(
         type(m).forward = gptj_offload_forward
     elif type(m) == OPTModel:
         type(m).forward = opt_offload_forward
-    elif type(m) == MPTModel:
+    elif mpt_support and type(m) == MPTModel:
         type(m).forward = mpt_offload_forward
     else:
         raise RuntimeError(f"Model type {type(m)} not supported by CPU offloader")
