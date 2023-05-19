@@ -484,9 +484,6 @@ if __name__ == '__main__':
             input_ids = next(iter(dataloader))[0][:, :args.benchmark]
             benchmark(model, input_ids, check=args.check)
             
-    if args.load:
-        exit()
-
     if args.eval:
         datasets = ['wikitext2', 'ptb', 'c4'] 
         if args.new_eval:
@@ -497,6 +494,9 @@ if __name__ == '__main__':
             )
             print(dataset)
             opt_eval(model, testloader, DEV)
+
+    if args.load:
+        exit()
 
     if args.save:
         opt_pack(model, quantizers, args.wbits, args.groupsize)

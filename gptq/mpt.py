@@ -519,6 +519,16 @@ if __name__ == "__main__":
         quantizers = mpt_sequential(model, dataloader, DEV)
         print(time.time() - tick)
 
+    if args.benchmark:
+        gpus = [torch.device("cuda:%d" % i) for i in range(torch.cuda.device_count())]
+        if len(gpus) > 1:
+            mpt_multigpu(model, gpus)
+        else:
+            model = model.to(DEV)
+        if args.benchmark:
+            input_ids = next(iter(dataloader))[0][:, : args.benchmark]
+            benchmark(model, input_ids, check=args.check)
+
     if args.eval:
         datasets = ["wikitext2", "ptb", "c4"]
         if args.new_eval:
@@ -530,6 +540,9 @@ if __name__ == "__main__":
             print(dataset)
             mpt_eval(model, testloader, DEV)
 
+    if args.load:
+        exit()
+
     if args.save:
         mpt_pack(model, quantizers, args.wbits, args.groupsize)
         torch.save(model.state_dict(), args.save)
@@ -539,15 +552,3 @@ if __name__ == "__main__":
         from safetensors.torch import save_file as safe_save
 
         safe_save(model.state_dict(), args.save_safetensors)
-
-    if args.benchmark:
-        gpus = [torch.device("cuda:%d" % i) for i in range(torch.cuda.device_count())]
-        if len(gpus) > 1:
-            mpt_multigpu(model, gpus)
-        else:
-            model = model.to(DEV)
-        if args.benchmark:
-            input_ids = next(iter(dataloader))[0][:, : args.benchmark]
-            benchmark(model, input_ids, check=args.check)
-    if args.load:
-        exit()
